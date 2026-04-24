@@ -1,0 +1,6 @@
+{
+  "name": "Church SaaS Platform",
+  "description": "Multi-tenant SaaS for churches with MoMo giving and admin dashboard.",
+  "requestFramePermissions": ["camera", "microphone", "geolocation"],
+  "majorCapabilities": []
+}
