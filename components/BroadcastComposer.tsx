@@ -44,7 +44,6 @@ export default function BroadcastComposer({ members, churchId }: {
     
     try {
       const tenantId = churchId; // church uuid
-      const finalMessage = message;
       let haltedReason = '';
 
       for (const m of filteredMembers) {
@@ -59,6 +58,10 @@ export default function BroadcastComposer({ members, churchId }: {
             ? crypto.randomUUID() 
             : Math.random().toString(36).substring(2, 15);
 
+          const personalizedMessage = message
+            .replace(/{name}/gi, m.full_name || 'Member')
+            .replace(/{first_name}/gi, (m.full_name || 'Member').split(' ')[0]);
+
           // We use a manual fetch instead of supabase.functions.invoke to aggressively prevent 
           // the Supabase SDK from crashing the browser runtime if the edge function returns a raw HTML 404 
           // (e.g. "An unexpected response was received from the server").
@@ -69,7 +72,7 @@ export default function BroadcastComposer({ members, churchId }: {
                 'Content-Type': 'application/json',
               },
               signal: AbortSignal.timeout(15000), // 15 second timeout to prevent hanging fetches
-              body: JSON.stringify({ phoneNumber: phone, message: finalMessage, churchId: tenantId, idempotencyKey: idempotencyKey })
+              body: JSON.stringify({ phoneNumber: phone, message: personalizedMessage, churchId: tenantId, idempotencyKey: idempotencyKey })
             });
 
             if (!res.ok) {
@@ -171,7 +174,10 @@ export default function BroadcastComposer({ members, churchId }: {
         </div>
 
         <div className="space-y-2">
-          <label className="block text-[10px] font-bold text-[#C8B89A] uppercase tracking-widest">Message Content</label>
+          <div className="flex justify-between items-center">
+            <label className="block text-[10px] font-bold text-[#C8B89A] uppercase tracking-widest">Message Content</label>
+            <span className="text-[10px] font-medium text-[#9A7E65]">Tip: Use <strong className="text-[#B5622A]">{"{name}"}</strong> or <strong className="text-[#B5622A]">{"{first_name}"}</strong> to personalize!</span>
+          </div>
           <textarea 
             rows={5}
             value={message}
