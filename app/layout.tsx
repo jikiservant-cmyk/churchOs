@@ -1,6 +1,7 @@
 import type {Metadata} from 'next';
 import { Outfit, Playfair_Display } from 'next/font/google';
 import './globals.css'; // Global styles
+import SWRegistration from '@/components/SWRegistration';
 
 const outfit = Outfit({
   subsets: ['latin'],
@@ -17,10 +18,17 @@ export const metadata: Metadata = {
   description: 'Management platform for pastors',
 };
 
+export const viewport = {
+  themeColor: '#1E1208',
+  width: 'device-width',
+  initialScale: 1,
+};
+
 export default function RootLayout({children}: {children: React.ReactNode}) {
   return (
     <html lang="en" className={`${outfit.variable} ${playfair.variable}`}>
       <body suppressHydrationWarning>
+        <SWRegistration />
         {children}
         <script
           dangerouslySetInnerHTML={{

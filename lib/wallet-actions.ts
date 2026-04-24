@@ -39,6 +39,8 @@ export async function topUpWallet(formData: FormData) {
       return;
     } else {
       // Record a transaction as well to maintain history
+      const { data: { user } } = await supabase.auth.getUser();
+      
       const { error: txError } = await supabase.from('wallet_transactions').insert({
         tenant_id: churchId,
         amount: amount,
@@ -47,10 +49,13 @@ export async function topUpWallet(formData: FormData) {
         reference_code: 'TOPUP_TEST_' + Date.now(),
         status: 'success',
         product: 'sms',
-        revenue_ugx: 0
+        revenue_ugx: 0,
+        created_by: user?.id || 'system'
       });
       if (txError) {
-         console.error('Failed to record top up transaction:', txError);
+         console.error('Failed to record top up transaction:', JSON.stringify(txError, null, 2));
+         console.log('Current User ID:', user?.id);
+         console.log('Target Tenant ID:', churchId);
       }
     }
   } catch (err: any) {

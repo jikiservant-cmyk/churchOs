@@ -91,7 +91,7 @@ CREATE TABLE IF NOT EXISTS public.wallet_transactions (
   id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
   tenant_id uuid REFERENCES public.tenants(id) NOT NULL,
   amount int NOT NULL, -- Negative for debit, Positive for credit
-  type text NOT NULL CHECK (type IN ('TOPUP','SMS_SENT','REFUND','ADJUSTMENT','BONUS','REVERSAL')),
+  type text NOT NULL CHECK (type IN ('TOPUP','SMS_SENT','REFUND','ADJUSTMENT','BONUS','REVERSAL','credit','debit')),
   description text,
   reference_code text UNIQUE,
   status text NOT NULL DEFAULT 'success', -- 'pending', 'success', 'failed'
@@ -337,6 +337,16 @@ CREATE POLICY "Pastors can view church transactions"
   ON public.wallet_transactions FOR SELECT
   TO authenticated
   USING (
+    EXISTS (
+      SELECT 1 FROM public.admin_profiles ap
+      WHERE ap.id = auth.uid() AND (ap.tenant_id = tenant_id OR ap.tenant_id IS NULL)
+    )
+  );
+
+CREATE POLICY "Pastors can insert church transactions"
+  ON public.wallet_transactions FOR INSERT
+  TO authenticated
+  WITH CHECK (
     EXISTS (
       SELECT 1 FROM public.admin_profiles ap
       WHERE ap.id = auth.uid() AND (ap.tenant_id = tenant_id OR ap.tenant_id IS NULL)
