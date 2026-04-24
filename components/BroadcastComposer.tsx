@@ -19,8 +19,8 @@ export default function BroadcastComposer({ members, churchId }: {
 
   const filteredMembers = members.filter(m => {
     if (audience === 'all') return true;
-    if (audience === 'men') return m.source === 'member' && m.gender === 'Male';
-    if (audience === 'women') return m.source === 'member' && m.gender === 'Female';
+    if (audience === 'men') return m.source === 'member' && m.gender === 'male';
+    if (audience === 'women') return m.source === 'member' && m.gender === 'female';
     if (audience === 'youth') return m.source === 'member' && m.is_youth === true;
     if (audience === 'new_converts') return m.source === 'new_convert';
     return true;

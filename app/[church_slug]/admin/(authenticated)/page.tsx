@@ -1,6 +1,6 @@
 import { getChurchBySlug } from '@/lib/db';
 import { createClient } from '@/lib/supabase/server';
-import { ArrowUpRight, ArrowDownRight, MessageSquarePlus, Wallet, Users, TrendingUp } from 'lucide-react';
+import { AdminCharts } from '@/components/AdminCharts';
 
 export default async function AdminDashboard({
   params,
@@ -23,35 +23,15 @@ export default async function AdminDashboard({
     .schema('church')
     .from('members')
     .select('id', { count: 'exact', head: true })
-    .eq('tenant_id', church.id);
-
-  if (memberCountError && memberCountError.message.includes('tenant_id')) {
-     const fallback = await supabase
-       .schema('church')
-       .from('members')
-       .select('id', { count: 'exact', head: true })
-       .eq('church_id', church.id);
-     memberCount = fallback.count;
-  }
+    .eq('church_id', church.id);
 
   let { data: recentMembers, error: recentMembersError } = await supabase
     .schema('church')
     .from('members')
     .select('full_name, created_at')
-    .eq('tenant_id', church.id)
+    .eq('church_id', church.id)
     .order('created_at', { ascending: false })
     .limit(5);
-
-  if (recentMembersError && recentMembersError.message.includes('tenant_id')) {
-     const fallback = await supabase
-       .schema('church')
-       .from('members')
-       .select('full_name, created_at')
-       .eq('church_id', church.id)
-       .order('created_at', { ascending: false })
-       .limit(5);
-     recentMembers = fallback.data;
-  }
 
   const realMemberCount = memberCount || 0;
   const mappedMembers = recentMembers?.map(m => ({
@@ -61,46 +41,56 @@ export default async function AdminDashboard({
   })) || [];
 
   // Fetch Events
-  const { data: dbEvents } = await supabase.schema('church').from('events').select('*').eq('tenant_id', church.id).order('created_at', { ascending: true }).limit(5);
+  const { data: dbEvents } = await supabase.schema('church').from('events').select('*').eq('church_id', church.id).order('created_at', { ascending: true }).limit(5);
   const events = dbEvents || [];
 
   // Fetch Prayers
-  const { data: dbPrayers } = await supabase.schema('church').from('prayers').select('*').eq('tenant_id', church.id).order('created_at', { ascending: false }).limit(5);
+  const { data: dbPrayers } = await supabase.schema('church').from('prayers').select('*').eq('church_id', church.id).order('created_at', { ascending: false }).limit(5);
   const prayers = dbPrayers?.map(p => {
     const diffHours = Math.floor((new Date().getTime() - new Date(p.created_at).getTime()) / (1000 * 60 * 60));
     const ago = diffHours < 24 ? `${diffHours}h ago` : diffHours < 48 ? 'Yesterday' : `${Math.floor(diffHours/24)}d ago`;
     return { name: p.submitter_name, text: p.body, ago, status: p.status };
   }) || [];
 
-  // Fetch Small Groups
-  const { data: dbGroups } = await supabase.schema('church').from('small_groups').select('*').eq('tenant_id', church.id).limit(5);
-  const groups = dbGroups || [];
-
-  // Fetch Donations
-  const { data: dbDonations } = await supabase.schema('church').from('donations').select('category, amount_cents').eq('tenant_id', church.id);
+  // Fetch Gender Distribution
+  let { data: membersForGender, error: genderErr } = await supabase.schema('church').from('members').select('gender').eq('church_id', church.id);
   
-  // Aggregate donations by category
-  let totalDonations = 0;
-  const givingMap: Record<string, number> = {};
-  if (dbDonations) {
-    dbDonations.forEach(d => {
-      totalDonations += (d.amount_cents / 100);
-      givingMap[d.category] = (givingMap[d.category] || 0) + (d.amount_cents / 100);
+  let maleCount = 0;
+  let femaleCount = 0;
+  if (membersForGender) {
+    membersForGender.forEach(m => {
+      if (m.gender === 'male') maleCount++;
+      if (m.gender === 'female') femaleCount++;
     });
   }
+  const genderData = [
+    { name: 'Men', value: maleCount, color: '#2B1A0E' },
+    { name: 'Women', value: femaleCount, color: '#B5622A' }
+  ];
+
+  // Fetch New Converts
+  let { data: recentConverts, error: convertsErr } = await supabase.schema('church').from('new_converts').select('created_at').eq('church_id', church.id).gte('created_at', new Date(new Date().setMonth(new Date().getMonth() - 5)).toISOString());
+
   
-  const givingTarget = 20000; // Hardcoded default target for display, or could fetch from a settings table if it existed
-  
-  const giving = Object.entries(givingMap).map(([label, amount]) => ({
-    label, 
-    amount,
-    pct: totalDonations > 0 ? Math.round((amount / totalDonations) * 100) : 0
-  })).sort((a,b) => b.amount - a.amount);
+  // Aggregate converts by month (last 6 months)
+  const convertsByMonth: Record<string, number> = {};
+  for (let i = 5; i >= 0; i--) {
+    const d = new Date();
+    d.setMonth(d.getMonth() - i);
+    convertsByMonth[d.toLocaleString('default', { month: 'short' })] = 0;
+  }
+  if (recentConverts) {
+    recentConverts.forEach(c => {
+      const month = new Date(c.created_at).toLocaleString('default', { month: 'short' });
+      if (convertsByMonth[month] !== undefined) {
+        convertsByMonth[month]++;
+      }
+    });
+  }
+  const convertsData = Object.keys(convertsByMonth).map(month => ({ month, count: convertsByMonth[month] }));
 
   const topStats = [
     { label: "Total Members", value: realMemberCount.toLocaleString(), note: "Active directory" },
-    { label: "Small Groups", value: groups.length.toString(), note: "Registered fellowships" },
-    { label: "Monthly Giving", value: `$${totalDonations.toLocaleString()}`, note: `${Math.round((totalDonations/givingTarget)*100)}% of goal` },
     { label: "Open Prayers", value: prayers.filter(p => p.status !== 'answered').length.toString(), note: "Awaiting intercession" },
   ];
 
@@ -117,7 +107,7 @@ export default async function AdminDashboard({
       </div>
 
       {/* Stats Grid */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 gap-4 mb-6">
         {topStats.map((s, i) => (
           <div key={i} className="bg-[#F0E6D3] border border-[rgba(90,55,20,0.13)] rounded-2xl p-6 transition-all hover:translate-y-[-2px] hover:shadow-lg">
             <p className="text-[10px] font-bold text-[#C8B89A] uppercase tracking-widest mb-3">
@@ -131,10 +121,12 @@ export default async function AdminDashboard({
         ))}
       </div>
 
-      {/* Events + Groups Row */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 mb-5">
-        {/* Upcoming Events */}
-        <div className="lg:col-span-7 bg-[#F0E6D3] border border-[rgba(90,55,20,0.13)] rounded-2xl overflow-hidden shadow-sm">
+      {/* Charts Row */}
+      <AdminCharts genderData={genderData} convertsData={convertsData} />
+
+      {/* Events Row (Now full width since Small Groups is removed) */}
+      <div className="mb-5">
+        <div className="bg-[#F0E6D3] border border-[rgba(90,55,20,0.13)] rounded-2xl overflow-hidden shadow-sm">
           <div className="px-6 py-5 flex items-center justify-between">
             <h4 style={{ fontFamily: "'Playfair Display', serif" }} className="text-lg font-bold text-[#1E1208]">Upcoming Events</h4>
             <button className="text-[11px] font-bold text-[#9A7E65] hover:text-[#B5622A] transition-colors uppercase tracking-wider">View all</button>
@@ -157,31 +149,6 @@ export default async function AdminDashboard({
                 <div className="text-right">
                    <p style={{ fontFamily: "'Playfair Display', serif" }} className="text-base font-bold text-[#1E1208]">{e.attending_count}</p>
                    <p className="text-[10px] text-[#C8B89A] font-medium leading-none">attending</p>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {/* Small Groups */}
-        <div className="lg:col-span-5 bg-[#F0E6D3] border border-[rgba(90,55,20,0.13)] rounded-2xl overflow-hidden shadow-sm">
-          <div className="px-6 py-5 flex items-center justify-between">
-            <h4 style={{ fontFamily: "'Playfair Display', serif" }} className="text-lg font-bold text-[#1E1208]">Small Groups</h4>
-            <button className="text-[11px] font-bold text-[#9A7E65] hover:text-[#B5622A] transition-colors uppercase tracking-wider">Manage</button>
-          </div>
-          <div className="border-t border-[rgba(90,55,20,0.08)]">
-            {groups.length === 0 ? (
-              <div className="px-6 py-8 text-center border-b border-[rgba(90,55,20,0.08)]">
-                <p className="text-[13px] text-[#9A7E65]">No active small groups.</p>
-              </div>
-            ) : groups.map((g, index) => (
-              <div key={index} className="px-6 py-4 flex items-center justify-between border-b border-[rgba(90,55,20,0.08)] last:border-0 hover:bg-[rgba(90,55,20,0.02)] transition-colors">
-                <div className="min-w-0">
-                  <p className="text-[14px] font-bold text-[#1E1208] truncate">{g.name}</p>
-                  <p className="text-[12px] text-[#9A7E65] mt-0.5">{g.leader_name} · {g.meeting_day}</p>
-                </div>
-                <div style={{ fontFamily: "'Playfair Display', serif" }} className="text-2xl font-bold text-[#B5622A]">
-                   {g.member_count}
                 </div>
               </div>
             ))}
@@ -241,45 +208,6 @@ export default async function AdminDashboard({
               </div>
             ))}
           </div>
-        </div>
-      </div>
-
-      {/* Giving Summary */}
-      <div className="bg-[#F0E6D3] border border-[rgba(90,55,20,0.13)] rounded-2xl p-8 shadow-sm">
-        <div className="flex items-end justify-between mb-6">
-          <div>
-            <h4 style={{ fontFamily: "'Playfair Display', serif" }} className="text-lg font-bold text-[#1E1208]">Monthly Giving</h4>
-            <p className="text-[12px] text-[#9A7E65] font-medium mt-0.5">Summary for April 2026</p>
-          </div>
-          <div className="text-right">
-             <span style={{ fontFamily: "'Playfair Display', serif" }} className="text-2xl font-bold text-[#1E1208]">$18,640</span>
-             <span className="text-[12px] text-[#9A7E65] font-medium ml-2">of $22,000 goal</span>
-          </div>
-        </div>
-        
-        <div className="h-2 w-full bg-[rgba(90,55,20,0.12)] rounded-full overflow-hidden mb-8">
-           <div className="h-full bg-[#B5622A] rounded-full" style={{ width: '84.7%' }} />
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-10">
-          {giving.length === 0 ? (
-            <div className="md:col-span-3 text-center py-4">
-              <p className="text-[13px] text-[#9A7E65]">No recent donations recorded.</p>
-            </div>
-          ) : giving.map((g, index) => (
-            <div key={index} className="flex flex-col">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-[11px] font-bold text-[#9A7E65] uppercase tracking-widest">{g.label}</span>
-                <span className="text-sm font-bold text-[#1E1208]">${g.amount.toLocaleString()}</span>
-              </div>
-              <div className="h-1 w-full bg-[rgba(90,55,20,0.08)] rounded-full overflow-hidden">
-                <div 
-                  className="h-full bg-[#B5622A] rounded-full transition-all duration-1000" 
-                  style={{ width: `${g.pct}%`, opacity: 0.5 + (g.pct / 200) }} 
-                />
-              </div>
-            </div>
-          ))}
         </div>
       </div>
     </div>

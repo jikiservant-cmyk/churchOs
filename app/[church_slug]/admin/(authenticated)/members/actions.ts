@@ -51,7 +51,7 @@ export async function addMember(formData: FormData) {
     }
 
     const payload = {
-      church_id: finalChurchId,
+      tenant_id: finalChurchId,
       full_name: fullName,
       phone_number: formattedPhone || '', // Use empty string instead of null to bypass NOT NULL constraints if empty
       email: email || null,

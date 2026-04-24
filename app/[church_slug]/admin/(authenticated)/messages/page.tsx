@@ -85,23 +85,8 @@ export default async function MessagesPage(props: {
       .schema("church")
       .from("members")
       .select("*")
-      .eq("tenant_id", church.id)
+      .eq("church_id", church.id)
       .not("phone_number", "is", null);
-
-    if (memberError && memberError.message.includes("tenant_id")) {
-      console.warn(
-        "[MessagesPage] Fallback: Trying member fetch with church_id instead of tenant_id",
-      );
-      const fallbackFetch = await supabase
-        .schema("church")
-        .from("members")
-        .select("*")
-        .eq("church_id", church.id)
-        .not("phone_number", "is", null);
-
-      memberData = fallbackFetch.data;
-      memberError = fallbackFetch.error;
-    }
 
     if (memberError) {
       console.error(
@@ -119,18 +104,6 @@ export default async function MessagesPage(props: {
       .select("*")
       .eq("church_id", church.id)
       .not("contact", "is", null);
-
-    if (convertsError && convertsError.message.includes("church_id")) {
-      const fallbackConverts = await supabase
-        .schema("church")
-        .from("new_converts")
-        .select("*")
-        .eq("tenant_id", church.id)
-        .not("contact", "is", null);
-
-      newConvertsData = fallbackConverts.data;
-      convertsError = fallbackConverts.error;
-    }
 
     if (convertsError) {
       console.error(
@@ -248,18 +221,6 @@ export default async function MessagesPage(props: {
             <p className="text-[10px] font-medium text-[#9A7E65] mt-0.5">
               UGX {balanceUgx.toLocaleString()} ({leftoverUGX} leftover)
             </p>
-          </div>
-          <div className="flex flex-col gap-2">
-            <form action={topUpWallet}>
-              <input type="hidden" name="churchId" value={church.id} />
-              <input type="hidden" name="amount" value="10000" />
-              <button
-                type="submit"
-                className="w-full px-4 py-2 bg-[#2B1A0E] text-[#F5E6CE] text-[11px] font-bold rounded-xl hover:bg-[#3D2614] transition-all shadow-md active:scale-95 uppercase tracking-wider"
-              >
-                Top Up
-              </button>
-            </form>
           </div>
         </div>
       </div>
