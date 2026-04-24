@@ -13,8 +13,8 @@ const playfair = Playfair_Display({
 });
 
 export const metadata: Metadata = {
-  title: 'My Google AI Studio App',
-  description: 'My Google AI Studio App',
+  title: 'pastorOs',
+  description: 'Management platform for pastors',
 };
 
 export default function RootLayout({children}: {children: React.ReactNode}) {

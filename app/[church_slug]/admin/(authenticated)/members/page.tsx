@@ -23,7 +23,7 @@ export default async function MembersPage(props: {
     <div className="max-w-7xl mx-auto space-y-6">
       {/* Header */}
       <div className="mb-8">
-        <h1 style={{ fontFamily: "'Playfair Display', serif" }} className="text-3xl font-bold text-[#1E1208]">Church Members</h1>
+        <h1 style={{ fontFamily: "'Playfair Display', serif" }} className="text-3xl font-bold text-[#1E1208]">Members</h1>
         <p className="text-[13px] text-[#9A7E65] mt-1.5 font-medium">Manage your congregation, families, and ministries.</p>
       </div>
 

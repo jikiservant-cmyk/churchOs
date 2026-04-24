@@ -1,6 +1,7 @@
 import { getChurchBySlug } from '@/lib/db';
 import { createClient } from '@/lib/supabase/server';
 import { AdminCharts } from '@/components/AdminCharts';
+import DashboardGreeting from '@/components/DashboardGreeting';
 
 export default async function AdminDashboard({
   params,
@@ -17,6 +18,13 @@ export default async function AdminDashboard({
   };
 
   const supabase = await createClient();
+
+  // Fetch pastor name
+  const { data: { user } } = await supabase.auth.getUser();
+  const pastorName = user?.user_metadata?.full_name || 
+                     user?.user_metadata?.name || 
+                     user?.email?.split('@')[0].split('.').map((s: string) => s.charAt(0).toUpperCase() + s.slice(1)).join(' ') || 
+                     'Pastor';
 
   // Fetch real data for stats and members
   let { count: memberCount, error: memberCountError } = await supabase
@@ -71,14 +79,18 @@ export default async function AdminDashboard({
   // Fetch New Converts
   let { data: recentConverts, error: convertsErr } = await supabase.schema('church').from('new_converts').select('created_at').eq('church_id', church.id).gte('created_at', new Date(new Date().setMonth(new Date().getMonth() - 5)).toISOString());
 
-  
   // Aggregate converts by month (last 6 months)
   const convertsByMonth: Record<string, number> = {};
+  const donationsByMonth: Record<string, number> = {};
+  
   for (let i = 5; i >= 0; i--) {
     const d = new Date();
     d.setMonth(d.getMonth() - i);
-    convertsByMonth[d.toLocaleString('default', { month: 'short' })] = 0;
+    const monthName = d.toLocaleString('default', { month: 'short' });
+    convertsByMonth[monthName] = 0;
+    donationsByMonth[monthName] = 0;
   }
+  
   if (recentConverts) {
     recentConverts.forEach(c => {
       const month = new Date(c.created_at).toLocaleString('default', { month: 'short' });
@@ -89,6 +101,24 @@ export default async function AdminDashboard({
   }
   const convertsData = Object.keys(convertsByMonth).map(month => ({ month, count: convertsByMonth[month] }));
 
+  // Fetch Donations
+  let { data: recentDonations } = await supabase
+    .schema('church')
+    .from('donations')
+    .select('amount_cents, created_at')
+    .eq('tenant_id', church.id)
+    .gte('created_at', new Date(new Date().setMonth(new Date().getMonth() - 5)).toISOString());
+
+  if (recentDonations) {
+    recentDonations.forEach(d => {
+      const month = new Date(d.created_at).toLocaleString('default', { month: 'short' });
+      if (donationsByMonth[month] !== undefined) {
+        donationsByMonth[month] += (d.amount_cents / 100);
+      }
+    });
+  }
+  const donationsData = Object.keys(donationsByMonth).map(month => ({ month, amount: donationsByMonth[month] }));
+
   const topStats = [
     { label: "Total Members", value: realMemberCount.toLocaleString(), note: "Active directory" },
     { label: "Open Prayers", value: prayers.filter(p => p.status !== 'answered').length.toString(), note: "Awaiting intercession" },
@@ -97,14 +127,7 @@ export default async function AdminDashboard({
   return (
     <div className="max-w-7xl mx-auto">
       {/* Greetings */}
-      <div className="mb-10">
-        <h2 style={{ fontFamily: "'Playfair Display', serif" }} className="text-3xl font-bold text-[#1E1208] leading-tight">
-          Good morning, Pastor
-        </h2>
-        <p className="text-[13px] text-[#9A7E65] mt-1.5 font-medium">
-          Wednesday, April 22 · Next service in <span className="text-[#B5622A] font-bold">4 days</span>
-        </p>
-      </div>
+      <DashboardGreeting pastorName={pastorName} />
 
       {/* Stats Grid */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 gap-4 mb-6">
@@ -122,7 +145,7 @@ export default async function AdminDashboard({
       </div>
 
       {/* Charts Row */}
-      <AdminCharts genderData={genderData} convertsData={convertsData} />
+      <AdminCharts genderData={genderData} convertsData={convertsData} donationsData={donationsData} />
 
       {/* Events Row (Now full width since Small Groups is removed) */}
       <div className="mb-5">

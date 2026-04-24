@@ -65,7 +65,7 @@ export default function LoginForm({ church, churchSlug, error: urlError }: { chu
       <div className="relative z-10 w-full max-w-sm bg-[#F0E6D3] border border-[rgba(90,55,20,0.15)] rounded-2xl p-10 shadow-2xl transition-all duration-500">
         <div className="text-center mb-10">
           <h1 style={{ fontFamily: "'Playfair Display', serif" }} className="text-3xl font-bold text-[#1E1208] mb-3">Welcome back</h1>
-          <p className="text-[14px] text-[#9A7E65] font-medium leading-relaxed">Sign in to manage {church.name}</p>
+          <p className="text-[14px] text-[#9A7E65] font-medium leading-relaxed">pastorOs</p>
         </div>
 
         {displayError && (
