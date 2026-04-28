@@ -60,20 +60,29 @@ export default async function AdminDashboard({
     return { name: p.submitter_name, text: p.body, ago, status: p.status };
   }) || [];
 
-  // Fetch Gender Distribution
-  let { data: membersForGender, error: genderErr } = await supabase.schema('church').from('members').select('gender').eq('church_id', church.id);
+  // Fetch Demographics
+  let { data: membersDemographics, error: demoErr } = await supabase.schema('church').from('members').select('gender, is_youth').eq('church_id', church.id);
   
   let maleCount = 0;
   let femaleCount = 0;
-  if (membersForGender) {
-    membersForGender.forEach(m => {
+  let youthCount = 0;
+  let adultCount = 0;
+
+  if (membersDemographics) {
+    membersDemographics.forEach(m => {
       if (m.gender === 'male') maleCount++;
       if (m.gender === 'female') femaleCount++;
+      if (m.is_youth) youthCount++;
+      else adultCount++;
     });
   }
   const genderData = [
     { name: 'Men', value: maleCount, color: '#2B1A0E' },
     { name: 'Women', value: femaleCount, color: '#B5622A' }
+  ];
+  const youthData = [
+    { name: 'Youth', value: youthCount, color: '#B5622A' },
+    { name: 'Adults', value: adultCount, color: '#2B1A0E' }
   ];
 
   // Fetch New Converts
@@ -82,20 +91,23 @@ export default async function AdminDashboard({
   // Aggregate converts by month (last 6 months)
   const convertsByMonth: Record<string, number> = {};
   const donationsByMonth: Record<string, number> = {};
+  const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   
   for (let i = 5; i >= 0; i--) {
     const d = new Date();
+    d.setDate(1); // Set to 1st of month to avoid overflow issues (e.g. March 31 -> Feb 28/29)
     d.setMonth(d.getMonth() - i);
-    const monthName = d.toLocaleString('default', { month: 'short' });
+    const monthName = monthNames[d.getMonth()];
     convertsByMonth[monthName] = 0;
     donationsByMonth[monthName] = 0;
   }
   
   if (recentConverts) {
     recentConverts.forEach(c => {
-      const month = new Date(c.created_at).toLocaleString('default', { month: 'short' });
-      if (convertsByMonth[month] !== undefined) {
-        convertsByMonth[month]++;
+      const d = new Date(c.created_at);
+      const monthName = monthNames[d.getMonth()];
+      if (convertsByMonth[monthName] !== undefined) {
+        convertsByMonth[monthName]++;
       }
     });
   }
@@ -106,14 +118,15 @@ export default async function AdminDashboard({
     .schema('church')
     .from('donations')
     .select('amount_cents, created_at')
-    .eq('tenant_id', church.id)
+    .eq('church_id', church.id)
     .gte('created_at', new Date(new Date().setMonth(new Date().getMonth() - 5)).toISOString());
 
   if (recentDonations) {
     recentDonations.forEach(d => {
-      const month = new Date(d.created_at).toLocaleString('default', { month: 'short' });
-      if (donationsByMonth[month] !== undefined) {
-        donationsByMonth[month] += (d.amount_cents / 100);
+      const dateStr = new Date(d.created_at);
+      const monthName = monthNames[dateStr.getMonth()];
+      if (donationsByMonth[monthName] !== undefined) {
+        donationsByMonth[monthName] += (d.amount_cents / 100);
       }
     });
   }
@@ -145,7 +158,7 @@ export default async function AdminDashboard({
       </div>
 
       {/* Charts Row */}
-      <AdminCharts genderData={genderData} convertsData={convertsData} donationsData={donationsData} />
+      <AdminCharts genderData={genderData} youthData={youthData} convertsData={convertsData} donationsData={donationsData} />
 
       {/* Events Row (Now full width since Small Groups is removed) */}
       <div className="mb-5">

@@ -10,52 +10,39 @@ export type AuthState = {
 };
 
 export async function login(prevState: AuthState, formData: FormData): Promise<AuthState> {
-  const email = formData.get('email') as string;
+  const email = (formData.get('email') as string || '').trim();
   const password = formData.get('password') as string;
   const churchSlug = formData.get('churchSlug') as string;
+
+  if (!email || !password) {
+    return { error: 'Email and password are required' };
+  }
 
   if (!process.env.NEXT_PUBLIC_SUPABASE_URL || !process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY) {
     return { error: 'Supabase not configured' };
   }
 
-  const supabase = await createClient();
-  
-  // 1. Sign in with Supabase Auth
-  const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
-    email,
-    password,
-  });
-
-  if (authError || !authData.user) {
-    return { error: authError?.message || 'Login failed' };
-  }
-
-  // 2. Verify Role and find Church Slug in admin_profiles
-  // We check for 'pastor' role specifically as requested.
-  // We prioritize lookup by ID first, then fallback to email if necessary.
-  
-  const handleError = (msg: string, err: any) => {
-    if (err) {
-      console.error(`${msg}:`, {
-        message: err.message,
-        code: err.code,
-        details: err.details,
-        hint: err.hint,
-        error: err
-      });
-    } else {
-      console.warn(msg);
-    }
-  };
-
-  let profile = null;
-  let profileError = null;
-
   try {
-    // Attempt 1: Fetch by ID (primary method)
+    const supabase = await createClient();
+    
+    // 1. Sign in with Supabase Auth
+    const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
+      email,
+      password,
+    });
+
+    if (authError || !authData.user) {
+      return { error: authError?.message || 'Login failed' };
+    }
+
+    // 2. Verify Role and find Church Slug in admin_profiles
+    let profile = null;
+    let profileError = null;
+
+    // Attempt 1: Fetch by ID
     const { data: idData, error: idError } = await supabase
       .from('admin_profiles')
-      .select('role, tenant_id, email')
+      .select('role, tenant_id, email, app_type')
       .eq('id', authData.user.id)
       .maybeSingle();
     
@@ -65,69 +52,100 @@ export async function login(prevState: AuthState, formData: FormData): Promise<A
       profileError = idError;
     }
 
-    // Attempt 2: Fallback to Email (as requested by user)
+    // Attempt 2: Fallback to Email
     if (!profile && !profileError) {
       const { data: emailData, error: emailError } = await supabase
         .from('admin_profiles')
-        .select('role, tenant_id, email')
+        .select('role, tenant_id, email, app_type')
         .eq('email', email)
         .maybeSingle();
-      
+    
       if (emailData) {
         profile = emailData;
-        console.log('[Auth] Profile found via email fallback:', email);
       } else {
         profileError = emailError;
       }
     }
-  } catch (err) {
-    console.error('[Auth] Critical error during profile lookup:', err);
-    profileError = err;
-  }
 
-  if (profileError || !profile) {
-    if (profileError) {
-      handleError('[Auth] Profile lookup failed', profileError);
-    } else {
-      console.warn('[Auth] No profile found for user after all attempts:', email);
+    if (profileError || !profile) {
+      await supabase.auth.signOut();
+      return { error: 'Access Denied: You are not authorized to access this portal.' };
     }
+
+    // Allow strictly pastor roles for this app
+    const authorizedRoles = ['pastor'];
+    if (!authorizedRoles.includes(profile.role.toLowerCase())) {
+      await supabase.auth.signOut();
+      return { error: `Access Denied: Role '${profile.role}' does not have admin access.` };
+    }
+
+    // 3. Get the correct slug from churches
+    let targetSlug = churchSlug;
+    const tenantId = profile.tenant_id;
+    const appType = profile.app_type;
     
-    // If no profile exists, the user might be authenticated in Auth but not authorized in our app.
-    await supabase.auth.signOut();
-    return { error: 'Access Denied: You are not registered as a pastor in our system.' };
-  }
-
-  if (profile.role !== 'pastor') {
-    await supabase.auth.signOut();
-    return { error: 'Access Denied: You do not have the required permissions.' };
-  }
-
-  // 3. Get the correct church slug
-  let targetSlug = churchSlug;
-  
-  if (profile.tenant_id) {
-    try {
-      const { data: church, error: slugError } = await supabase
-        .schema('church')
-        .from('churches')
-        .select('slug')
-        .eq('id', profile.tenant_id)
-        .maybeSingle();
-      
-      if (slugError) {
-        handleError('[Auth] Error resolving church slug by ID', slugError);
-      } else if (church?.slug) {
-        targetSlug = church.slug;
-      } else {
-        console.warn(`[Auth] No slug found in churches table for tenant_id: ${profile.tenant_id}`);
+    if (tenantId) {
+      if (appType === 'church' || (!appType && profile.role === 'pastor')) {
+        const { data: church } = await supabase
+          .schema('church')
+          .from('churches')
+          .select('slug')
+          .eq('id', tenantId)
+          .maybeSingle();
+        
+        if (church?.slug) targetSlug = church.slug;
       }
-    } catch (err) {
-      console.error('[Auth] Exception during church slug resolution:', err);
     }
+
+    console.log(`[Auth] User authorized. Redirecting to /${targetSlug || 'admin'}/admin`);
+    redirect(`/${targetSlug || 'admin'}/admin`);
+  } catch (err: any) {
+    if (err.message === 'NEXT_REDIRECT' || err.__next_redirect) throw err;
+    console.error('[Auth] Login exception:', err);
+    return { error: err.message || 'An unexpected error occurred during login.' };
+  }
+}
+
+export async function signup(prevState: AuthState, formData: FormData): Promise<AuthState> {
+  const email = (formData.get('email') as string || '').trim();
+  const password = formData.get('password') as string;
+
+  if (!email || !password) {
+    return { error: 'Email and password are required' };
   }
 
-  console.log(`[Auth] User authorized as pastor. Redirecting to /${targetSlug}/admin (Profile tenant: ${profile.tenant_id})`);
-  return { success: true, redirectTo: `/${targetSlug}/admin` };
+  if (!process.env.NEXT_PUBLIC_SUPABASE_URL || !process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY) {
+    return { error: 'Auth service not configured properly' };
+  }
+
+  try {
+    const supabase = await createClient();
+    console.log('[Auth] Attempting signup for:', email);
+    
+    const { data, error } = await supabase.auth.signUp({
+      email,
+      password,
+    });
+
+    if (error) {
+      console.error('[Auth] Signup error:', error.message);
+      if (error.message.toLowerCase().includes('already registered')) {
+        return { error: 'This email is already registered. Please login instead.' };
+      }
+      return { error: error.message };
+    }
+
+    if (!data.user) {
+      return { error: 'Account creation failed. Please try again.' };
+    }
+
+    console.log('[Auth] Signup success for:', email);
+    return { success: true, redirectTo: '/signup/provision' };
+  } catch (err: any) {
+    if (err.message === 'NEXT_REDIRECT' || err.__next_redirect) throw err;
+    console.error('[Auth] Critical signup exception:', err);
+    return { error: 'An unexpected error occurred. Please try again later.' };
+  }
 }
 
 export async function logout(formData: FormData) {

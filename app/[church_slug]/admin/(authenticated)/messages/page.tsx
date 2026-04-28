@@ -147,6 +147,7 @@ export default async function MessagesPage(props: {
       .schema("church")
       .from("sms_logs")
       .select("id, created_at, body, status")
+      .eq("tenant_id", church.id)
       .order("created_at", { ascending: false })
       .limit(200);
     smsLogs = data || [];

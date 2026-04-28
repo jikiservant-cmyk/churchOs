@@ -3,9 +3,9 @@ import { createClient as createSupabaseServerClient } from '@/lib/supabase/serve
 
 export async function POST(req: Request) {
   try {
-    const { tenant_id, amount_ugx, provider_reference } = await req.json();
+    const { church_id, amount_ugx, provider_reference } = await req.json();
 
-    if (!tenant_id || !amount_ugx || !provider_reference) {
+    if (!church_id || !amount_ugx || !provider_reference) {
       return NextResponse.json({ error: 'Missing required parameters' }, { status: 400 });
     }
 
@@ -21,7 +21,7 @@ export async function POST(req: Request) {
       .schema('public')
       .from('wallet_transactions')
       .insert({
-        tenant_id,
+        tenant_id: church_id,
         amount: amount_ugx, // Positive for Top-up
         type: 'TOPUP',
         description: `Wallet load via Mobile Money`,
@@ -48,7 +48,7 @@ export async function POST(req: Request) {
     // For now, this RPC handles the increment atomically.
     const { error: rpcError } = await supabase
       .rpc('increment_wallet_balance', { 
-        p_tenant_id: tenant_id, 
+        p_tenant_id: church_id, 
         p_amount: amount_ugx 
       });
 

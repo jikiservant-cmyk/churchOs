@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { login } from '@/lib/auth-actions';
 import { useEffect, useState, useActionState, useRef } from 'react';
 import Image from 'next/image';
@@ -105,9 +106,18 @@ export default function LoginForm({ church, churchSlug, error: urlError }: { chu
           >
             {pending ? <div className="w-5 h-5 border-2 border-[rgba(245,230,206,0.3)] border-t-[#F5E6CE] rounded-full animate-spin" /> : 'Enter Portal'}
           </button>
+          <div className="text-center mt-6 pt-4 border-t border-[rgba(90,55,20,0.08)]">
+            <p className="text-[11px] text-[#9A7E65] mb-3 uppercase tracking-widest font-bold opacity-60">New to the family?</p>
+            <Link 
+              href="/signup" 
+              className="inline-block w-full py-3 px-6 bg-[rgba(181,98,42,0.08)] border border-[rgba(181,98,42,0.2)] text-[#B5622A] text-[11px] font-bold uppercase tracking-widest rounded-xl hover:bg-[rgba(181,98,42,0.12)] transition-all"
+            >
+              Request Access / Sign Up
+            </Link>
+          </div>
         </form>
 
-        <div className="mt-10 pt-8 border-t border-[rgba(90,55,20,0.08)] text-center">
+        <div className="mt-8 pt-4 text-center">
             <p className="text-[11px] text-[#C8B89A] font-medium italic">
                 &quot;Grace and peace be yours in abundance&quot;
             </p>

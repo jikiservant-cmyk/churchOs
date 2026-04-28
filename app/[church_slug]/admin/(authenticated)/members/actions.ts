@@ -30,7 +30,7 @@ export async function addMember(formData: FormData) {
       .eq('slug', churchSlug)
       .maybeSingle();
 
-    // Now that RLS uses church.my_tenant_id(), we just need to ensure we insert the correct ID for the URL slug.
+    // Now that RLS uses church.my_church_id(), we just need to ensure we insert the correct ID for the URL slug.
     const finalChurchId = church?.id;
 
     if (!finalChurchId) {

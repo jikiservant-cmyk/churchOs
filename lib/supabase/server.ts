@@ -40,3 +40,28 @@ export async function createClient() {
     }
   );
 }
+
+export async function createAdminClient() {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+  if (!url || !key) {
+    // Return a dummy client that will fail on actual requests but won't crash the server during boot/SSR
+    return createServerClient(
+      'https://placeholder.supabase.co',
+      'placeholder-key',
+      { cookies: { getAll: () => [], setAll: () => {} } }
+    );
+  }
+
+  return createServerClient(
+    url,
+    key,
+    {
+      cookies: {
+        getAll: () => [],
+        setAll: () => {},
+      },
+    }
+  );
+}

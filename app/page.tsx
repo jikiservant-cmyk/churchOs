@@ -30,12 +30,13 @@ export default async function RootLoginPage({
         .maybeSingle();
 
       // Verify they are a pastor
-      if (profile?.role === 'pastor' && profile.tenant_id) {
+      const churchId = profile?.tenant_id;
+      if (profile?.role === 'pastor' && churchId) {
          const { data: church } = await supabase
            .schema('church')
            .from('churches')
            .select('slug')
-           .eq('id', profile.tenant_id)
+           .eq('id', churchId)
            .maybeSingle();
            
          if (church?.slug) {
@@ -91,5 +92,3 @@ export default async function RootLoginPage({
     />
   );
 }
-
-

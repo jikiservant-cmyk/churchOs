@@ -10,12 +10,20 @@ export default async function MembersPage(props: {
   const searchParams = await props.searchParams;
   const supabase = await createClient();
 
+  // Fetch church details first to get the ID for filtering
+  const { data: church } = await supabase
+    .schema('church')
+    .from('churches')
+    .select('id')
+    .eq('slug', resolvedParams.church_slug)
+    .maybeSingle();
+
   // Fetch members. 
-  // Notice we DO NOT filter by tenant_id. RLS automatically scopes this to the logged-in pastor's church!
   const { data: members, error } = await supabase
     .schema('church')
     .from('members')
     .select('*')
+    .eq('church_id', church?.id || '00000000-0000-0000-0000-000000000000')
     .order('created_at', { ascending: false })
     .limit(50);
 

@@ -9,6 +9,10 @@ export default async function ChurchLayout({
   params: Promise<{ church_slug: string }>;
 }) {
   const resolvedParams = await params;
+  if (resolvedParams.church_slug === '404' || resolvedParams.church_slug === '_not-found') {
+    return <>{children}</>;
+  }
+
   const church = await getChurchBySlug(resolvedParams.church_slug);
 
   if (!church) {
