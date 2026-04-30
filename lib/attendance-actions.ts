@@ -233,9 +233,41 @@ export async function claimAdminAccess(churchId: string, churchSlug: string) {
   }
 }
 
-export async function markAttendance(eventId: string, memberId: string, status: 'present' | 'late' | 'absent' | 'excused' = 'present') {
+async function checkAuthorization(churchSlug: string, eventId: string) {
+  const adminClient = await createAdminClient();
+  const { data: event } = await adminClient.schema('church').from('events').select('church_id').eq('id', eventId).single();
+  
+  if (!event) {
+    throw new Error('Event not found.');
+  }
+  
+  // 1. Is there an usher session for this church?
+  const usherSession = await getUsherSession(churchSlug);
+  if (usherSession && usherSession.church_slug === churchSlug && usherSession.church_id === event.church_id) {
+    return { adminClient, allowed: true };
+  }
+
+  // 2. Is there a logged-in admin for this church?
+  const client = await createClient();
+  const { data: { user } } = await client.auth.getUser();
+
+  if (user) {
+    const { data: profile } = await adminClient.from('admin_profiles').select('tenant_id').eq('id', user.id).single();
+    if (profile && profile.tenant_id === event.church_id) {
+       // Make sure churchSlug matches the tenant (rough check, strictly we check the event's church_id)
+       const { data: church } = await adminClient.schema('church').from('churches').select('slug').eq('id', event.church_id).single();
+       if (church && church.slug === churchSlug) {
+         return { adminClient, allowed: true };
+       }
+    }
+  }
+
+  throw new Error('Unauthorized to modify this event.');
+}
+
+export async function markAttendance(churchSlug: string, eventId: string, memberId: string, status: 'present' | 'late' | 'absent' | 'excused' = 'present') {
   try {
-    const supabase = await createAdminClient();
+    const { adminClient: supabase } = await checkAuthorization(churchSlug, eventId);
     
     const { error } = await supabase
       .schema('church')
@@ -247,18 +279,17 @@ export async function markAttendance(eventId: string, memberId: string, status: 
 
     if (error) return { error: error.message };
 
-    // Increment event count
     await supabase.schema('church').rpc('increment_event_attendance', { event_id: eventId });
 
     return { success: true };
-  } catch (error) {
-    return { error: 'Failed to record check-in. please check connection.' };
+  } catch (error: any) {
+    return { error: error.message || 'Failed to record check-in.' };
   }
 }
 
-export async function removeAttendance(eventId: string, memberId: string) {
+export async function removeAttendance(churchSlug: string, eventId: string, memberId: string) {
   try {
-    const supabase = await createAdminClient();
+    const { adminClient: supabase } = await checkAuthorization(churchSlug, eventId);
     
     const { error } = await supabase
       .schema('church')
@@ -269,12 +300,11 @@ export async function removeAttendance(eventId: string, memberId: string) {
 
     if (error) return { error: error.message };
 
-    // Decrement event count
     await supabase.schema('church').rpc('decrement_event_attendance', { event_id: eventId });
 
     return { success: true };
-  } catch (error) {
-    return { error: 'Failed to remove check-in.' };
+  } catch (error: any) {
+    return { error: error.message || 'Failed to remove check-in.' };
   }
 }
 

@@ -11,6 +11,7 @@ import {
 import BroadcastComposer from "@/components/BroadcastComposer";
 import { getChurchBySlug } from "@/lib/db";
 import { formatDistanceToNow } from "date-fns";
+import BroadcastHistory from "@/components/BroadcastHistory";
 
 export default async function MessagesPage(props: {
   params: Promise<{ church_slug: string }>;
@@ -153,32 +154,56 @@ export default async function MessagesPage(props: {
     smsLogs = data || [];
   }
 
-  // Group by message to represent a "broadcast"
-  const broadcastGroups = Object.values(
-    (smsLogs || []).reduce((acc: any, log: any) => {
-      const msgContent = log.body || "";
-      if (!acc[msgContent]) {
-        acc[msgContent] = {
-          message: msgContent,
-          created_at: log.created_at || new Date().toISOString(),
-          count: 0,
-          successCount: 0,
-          failedCount: 0,
-        };
+  // Group by date, then by message to represent a "broadcast" per day
+  const groupedByDateAndMsg = (smsLogs || []).reduce((acc: any, log: any) => {
+    const msgContent = log.body || "";
+    let dateStr = "Unknown Date";
+    try {
+      if (log.created_at) {
+        const d = new Date(log.created_at);
+        if (!isNaN(d.getTime())) {
+          dateStr = d.toLocaleDateString(undefined, {
+            weekday: 'short',
+            year: 'numeric',
+            month: 'short',
+            day: 'numeric',
+          });
+        }
       }
-      acc[msgContent].count++;
-      if (log.status?.toLowerCase() === "failed") {
-        acc[msgContent].failedCount++;
-      } else {
-        // assume sent, delivered, or pending are successful intents
-        acc[msgContent].successCount++;
-      }
-      return acc;
-    }, {}),
-  ).sort(
-    (a: any, b: any) =>
-      new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
-  );
+    } catch {}
+
+    if (!acc[dateStr]) acc[dateStr] = {};
+
+    if (!acc[dateStr][msgContent]) {
+      acc[dateStr][msgContent] = {
+        message: msgContent,
+        created_at: log.created_at || new Date().toISOString(),
+        count: 0,
+        successCount: 0,
+        failedCount: 0,
+      };
+    }
+    
+    acc[dateStr][msgContent].count++;
+    if (log.status?.toLowerCase() === "failed") {
+      acc[dateStr][msgContent].failedCount++;
+    } else {
+      acc[dateStr][msgContent].successCount++;
+    }
+    return acc;
+  }, {});
+
+  const broadcastDates = Object.entries(groupedByDateAndMsg).map(([dateStr, msgsMap]: [string, any]) => {
+    const messages = Object.values(msgsMap).sort(
+      (a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+    );
+    const maxDate = Math.max(...messages.map((m: any) => new Date(m.created_at).getTime()));
+    return {
+      dateStr,
+      messages,
+      sortTime: maxDate,
+    };
+  }).sort((a, b) => b.sortTime - a.sortTime);
 
   return (
     <div className="max-w-7xl mx-auto space-y-6">
@@ -267,63 +292,7 @@ export default async function MessagesPage(props: {
             Recent Broadcasts
           </h2>
 
-          {broadcastGroups.length === 0 ? (
-            <div className="flex flex-col items-center justify-center py-10 text-center flex-1">
-              <div className="w-12 h-12 bg-[rgba(90,55,20,0.05)] rounded-full flex items-center justify-center mb-3">
-                <Smartphone className="w-6 h-6 text-[#C8B89A]" />
-              </div>
-              <h3 className="text-[#1E1208] font-bold text-sm">No History</h3>
-              <p className="text-[#9A7E65] text-xs mt-1 max-w-[200px]">
-                You haven&apos;t sent any bulk SMS broadcasts recently.
-              </p>
-            </div>
-          ) : (
-            <ul className="space-y-4">
-              {broadcastGroups.map((broadcast: any, idx: number) => (
-                <li
-                  key={idx}
-                  className="border-b border-[rgba(90,55,20,0.05)] pb-4 last:border-0 last:pb-0"
-                >
-                  <div className="flex justify-between items-start mb-1.5">
-                    <span className="text-[10px] font-bold text-[#C8B89A] uppercase tracking-wider">
-                      {(() => {
-                        try {
-                          const d = new Date(broadcast.created_at);
-                          if (isNaN(d.getTime())) return "Recently";
-                          return formatDistanceToNow(d, { addSuffix: true });
-                        } catch (e) {
-                          return "Recently";
-                        }
-                      })()}
-                    </span>
-                    {broadcast.failedCount > 0 &&
-                    broadcast.successCount === 0 ? (
-                      <span className="flex items-center gap-1 text-[9px] font-bold text-[#B5622A] bg-red-50/50 px-2 py-0.5 rounded-full uppercase tracking-widest">
-                        <XCircle className="w-3 h-3" /> Failed
-                      </span>
-                    ) : (
-                      <span className="flex items-center gap-1 text-[9px] font-bold text-emerald-700 bg-emerald-50/30 px-2 py-0.5 rounded-full uppercase tracking-widest">
-                        <CheckCircle2 className="w-3 h-3" /> Delivered
-                      </span>
-                    )}
-                  </div>
-                  <p className="text-[13.5px] leading-relaxed font-medium text-[#1E1208] line-clamp-2">
-                    {broadcast.message}
-                  </p>
-                  <p className="text-[11px] text-[#9A7E65] mt-2 font-medium">
-                    Sent to {broadcast.count} member
-                    {broadcast.count !== 1 ? "s" : ""}
-                    {broadcast.failedCount > 0 && (
-                      <span className="text-[#B5622A]">
-                        {" "}
-                        ({broadcast.failedCount} failed)
-                      </span>
-                    )}
-                  </p>
-                </li>
-              ))}
-            </ul>
-          )}
+          <BroadcastHistory broadcastDates={broadcastDates} />
         </div>
       </div>
     </div>

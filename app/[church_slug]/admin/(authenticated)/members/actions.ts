@@ -1,16 +1,31 @@
 'use server';
 
-import { createClient } from '@/lib/supabase/server';
+import { createClient, createAdminClient } from '@/lib/supabase/server';
 import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
 import { normalizeUgPhone } from '@/lib/utils';
+
+async function checkChurchAdminAuth(churchSlug: string) {
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) throw new Error('Unauthenticated');
+
+  const adminSupabase = await createAdminClient();
+  const { data: church } = await adminSupabase.schema('church').from('churches').select('id').eq('slug', churchSlug).single();
+  if (!church) throw new Error('Church not found');
+
+  const { data: profile } = await adminSupabase.from('admin_profiles').select('tenant_id').eq('id', user.id).eq('tenant_id', church.id).single();
+  if (!profile) throw new Error('Unauthorized to perform this action for this church');
+
+  return { supabase, user, churchId: church.id };
+}
 
 export async function addMember(formData: FormData) {
   let churchSlug = formData.get('churchSlug') as string;
   let searchParams = '';
 
   try {
-    const supabase = await createClient();
+    const { supabase, user, churchId: finalChurchId } = await checkChurchAdminAuth(churchSlug);
     
     const firstName = formData.get('firstName') as string;
     const lastName = formData.get('lastName') as string;
@@ -20,24 +35,6 @@ export async function addMember(formData: FormData) {
     const gender = formData.get('gender') as string;
     const birthday = formData.get('birthday') as string;
     const isYouth = formData.get('isYouth') === 'true';
-    
-    const { data: { user } } = await supabase.auth.getUser();
-
-    const { data: church, error: lookupError } = await supabase
-      .schema('church')
-      .from('churches')
-      .select('id')
-      .eq('slug', churchSlug)
-      .maybeSingle();
-
-    // Now that RLS uses church.my_church_id(), we just need to ensure we insert the correct ID for the URL slug.
-    const finalChurchId = church?.id;
-
-    if (!finalChurchId) {
-      searchParams = new URLSearchParams({
-        error: `Demo mode: Cannot save because church "${churchSlug}" doesn't natively exist in the database yet.`,
-      }).toString();
-    } else {
       let formattedPhone = null;
       if (phone) {
         try {
@@ -108,7 +105,6 @@ export async function addMember(formData: FormData) {
            }).toString();
         }
       }
-    }
   } catch (err: any) {
       console.error('Unhandled exception in addMember:', err);
       // Do not swallow NEXT_REDIRECT
@@ -123,4 +119,124 @@ export async function addMember(formData: FormData) {
   }
 
   revalidatePath(`/${churchSlug}/admin/members`);
+}
+
+export async function editMember(formData: FormData) {
+  let churchSlug = formData.get('churchSlug') as string;
+  let memberId = formData.get('memberId') as string;
+  let searchParams = '';
+
+  try {
+    const { supabase, churchId: finalChurchId } = await checkChurchAdminAuth(churchSlug);
+    
+    const firstName = formData.get('firstName') as string;
+    const lastName = formData.get('lastName') as string;
+    const fullName = `${firstName} ${lastName}`.trim();
+    const phone = formData.get('phone') as string;
+    const gender = formData.get('gender') as string;
+    const birthday = formData.get('birthday') as string;
+    const isYouth = formData.get('isYouth') === 'true';
+
+    let formattedPhone = phone;
+    if (phone) {
+      try {
+        formattedPhone = normalizeUgPhone(phone);
+      } catch (err: any) {
+        formattedPhone = phone.trim();
+      }
+    }
+
+    const payload = {
+      full_name: fullName,
+      phone_number: formattedPhone || '',
+      gender: gender ? gender.toLowerCase() : null,
+      birthday: birthday || null,
+      is_youth: isYouth,
+    };
+
+    const { error } = await supabase
+      .schema('church')
+      .from('members')
+      .update(payload)
+      .eq('id', memberId);
+
+    if (error) {
+      console.error('Error updating member:', error);
+      searchParams = new URLSearchParams({
+        error: `DB Update Error: ${error.message}`,
+      }).toString();
+    }
+  } catch (err: any) {
+      console.error('Unhandled exception in editMember:', err);
+      if (err.message === 'NEXT_REDIRECT') {
+        throw err;
+      }
+      searchParams = new URLSearchParams({ error: 'Failed to update member.' }).toString();
+  }
+
+  if (searchParams) {
+    redirect(`/${churchSlug}/admin/members/edit/${memberId}?${searchParams}`);
+  }
+
+  revalidatePath(`/${churchSlug}/admin/members`);
+  redirect(`/${churchSlug}/admin/members`);
+}
+
+export async function bulkAddMembers(churchSlug: string, membersData: any[]) {
+  try {
+    const { supabase, churchId: finalChurchId } = await checkChurchAdminAuth(churchSlug);
+
+    const payload = membersData.map((member) => {
+       // Format phone if needed
+       let formattedPhone = member.phone || member.phone_number || member.phoneNumber || '';
+       if (formattedPhone) {
+         try {
+           formattedPhone = normalizeUgPhone(String(formattedPhone));
+         } catch(e) {
+           formattedPhone = String(formattedPhone).trim();
+         }
+       }
+
+       let gender = member.gender ? String(member.gender).toLowerCase() : null;
+       if (gender !== 'male' && gender !== 'female') gender = null;
+       
+       let isYouth = member.is_youth || member.isYouth || member.youth || false;
+       if (typeof isYouth === 'string') isYouth = isYouth.toLowerCase() === 'true' || isYouth === '1' || isYouth.toLowerCase() === 'yes';
+
+       const firstName = member.first_name || member.firstName || '';
+       const lastName = member.last_name || member.lastName || '';
+       let fullName = member.full_name || member.fullName || member.name || '';
+       
+       if (!fullName && (firstName || lastName)) {
+         fullName = `${firstName} ${lastName}`.trim();
+       }
+
+       return {
+         church_id: finalChurchId,
+         full_name: fullName || 'Unknown',
+         phone_number: formattedPhone,
+         email: member.email || null,
+         gender,
+         birthday: member.birthday || member.dob || null,
+         is_youth: !!isYouth,
+         status: 'active'
+       };
+    });
+
+    const { error } = await supabase
+      .schema('church')
+      .from('members')
+      .insert(payload);
+
+    if (error) {
+       console.error('Error in bulk insert:', error);
+       return { error: `DB Bulk Insert Error: ${error.message}` };
+    }
+    
+    revalidatePath(`/${churchSlug}/admin/members`);
+    return { success: true };
+  } catch (err: any) {
+    console.error('Unhandled exception in bulkAddMembers:', err);
+    return { error: 'Failed to bulk-add members due to application error.' };
+  }
 }

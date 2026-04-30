@@ -6,6 +6,7 @@ import { format } from 'date-fns';
 import { updateAttendanceFlagStatus } from '@/lib/attendance-actions';
 import { toast } from 'sonner';
 import { useState } from 'react';
+import { useRouter } from 'next/navigation';
 
 interface AttendanceAlertsProps {
   flags: AttendanceFlag[];
@@ -13,6 +14,7 @@ interface AttendanceAlertsProps {
 }
 
 export function AttendanceAlerts({ flags, churchSlug }: AttendanceAlertsProps) {
+  const router = useRouter();
   const [processingId, setProcessingId] = useState<string | null>(null);
 
   const handleUpdateStatus = async (flagId: string, status: 'followed_up' | 'resolved') => {
@@ -23,6 +25,7 @@ export function AttendanceAlerts({ flags, churchSlug }: AttendanceAlertsProps) {
         toast.error('Failed to update status: ' + result.error);
       } else {
         toast.success(`Flag marked as ${status === 'followed_up' ? 'followed up' : 'resolved'}`);
+        router.refresh(); // Ensure the UI updates
       }
     } catch (error) {
       toast.error('An unexpected error occurred');
@@ -31,7 +34,11 @@ export function AttendanceAlerts({ flags, churchSlug }: AttendanceAlertsProps) {
     }
   };
 
-  if (flags.length === 0) {
+  const activeFlags = flags
+    .filter(f => f.status === 'open')
+    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+
+  if (activeFlags.length === 0) {
     return (
       <div className="bg-white border border-[#E9E1D2] rounded-3xl p-8 text-center">
         <div className="w-12 h-12 bg-[#FAF7F0] rounded-full flex items-center justify-center mx-auto text-[#9A7E65] mb-4">
@@ -43,24 +50,17 @@ export function AttendanceAlerts({ flags, churchSlug }: AttendanceAlertsProps) {
   }
 
   return (
-    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-      {flags.map((flag) => (
+    <div className="grid grid-cols-1 xl:grid-cols-2 2xl:grid-cols-3 gap-4">
+      {activeFlags.map((flag) => (
         <div
           key={flag.id}
-          className={`bg-white border border-[#E9E1D2] rounded-2xl p-5 shadow-sm hover:shadow-md transition-all border-l-4 ${
-            flag.status === 'followed_up' ? 'border-l-blue-400' : 'border-l-[#B5622A]'
-          }`}
+          className="bg-white border border-[#E9E1D2] rounded-2xl p-5 shadow-sm hover:shadow-md transition-all border-l-4 border-l-[#B5622A]"
         >
           <div className="flex justify-between items-start mb-3">
             <div className="flex flex-col gap-1">
               <span className="px-2 py-0.5 bg-[#FFF4E5] text-[#B5622A] text-[9px] font-bold uppercase tracking-widest rounded-full w-fit">
                 {flag.flag_type === 'inactive_30_days' ? 'Inactive (30 Days)' : 'Missed 3 Sundays'}
               </span>
-              {flag.status === 'followed_up' && (
-                <span className="px-2 py-0.5 bg-blue-50 text-blue-600 text-[8px] font-bold uppercase tracking-widest rounded-full w-fit border border-blue-100">
-                  Followed Up
-                </span>
-              )}
             </div>
             <span className="text-[10px] text-[#9A7E65] font-medium flex items-center gap-1">
               <Calendar className="w-3 h-3" />
@@ -85,19 +85,13 @@ export function AttendanceAlerts({ flags, churchSlug }: AttendanceAlertsProps) {
             </div>
 
             <div className="pt-3 border-t border-[#F5F1E8] flex gap-2">
-              {flag.status === 'open' ? (
-                <button 
-                  onClick={() => handleUpdateStatus(flag.id, 'followed_up')}
-                  disabled={processingId === flag.id}
-                  className="flex-1 px-3 py-2 bg-[#B5622A] text-white rounded-xl text-[11px] font-bold uppercase tracking-wider hover:bg-[#944F22] transition-all flex items-center justify-center gap-2"
-                >
-                  {processingId === flag.id ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Mark Followed'}
-                </button>
-              ) : (
-                <div className="flex-1 flex items-center justify-center text-[10px] text-blue-600 font-bold uppercase tracking-wider bg-blue-50 rounded-xl px-3 py-2">
-                  Follow-up Active
-                </div>
-              )}
+              <button 
+                onClick={() => handleUpdateStatus(flag.id, 'followed_up')}
+                disabled={processingId === flag.id}
+                className="flex-1 px-3 py-2 bg-[#B5622A] text-white rounded-xl text-[11px] font-bold uppercase tracking-wider hover:bg-[#944F22] transition-all flex items-center justify-center gap-2"
+              >
+                {processingId === flag.id ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Mark Followed'}
+              </button>
               <button 
                 onClick={() => handleUpdateStatus(flag.id, 'resolved')}
                 disabled={processingId === flag.id}

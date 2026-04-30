@@ -90,6 +90,7 @@ export default async function UsherDashboard({ params }: { params: Promise<{ chu
           </div>
         ) : (
           <UsherDashboardClient 
+            churchSlug={church_slug}
             event={activeEvent}
             members={members || []}
             initialLogs={attendanceLogs}

@@ -141,6 +141,7 @@ export default async function EventAttendancePage(props: {
       {/* Main Check-In Interface */}
       {event.status === 'active' ? (
         <CheckInClient 
+          churchSlug={church_slug}
           eventId={eventId} 
           members={members || []} 
           attendedMemberIds={attendedMemberIds}

@@ -13,6 +13,7 @@ export default function BroadcastComposer({ members, churchId }: {
   const [message, setMessage] = useState('');
   const [isSending, setIsSending] = useState(false);
   const [audience, setAudience] = useState<'all' | 'men' | 'women' | 'youth' | 'new_converts'>('all');
+  const [recipientLimit, setRecipientLimit] = useState<number | ''>('');
   const [progress, setProgress] = useState({ active: false, total: 0, sent: 0, failed: 0 });
   const sendingRef = useRef(false);
   const router = useRouter();
@@ -25,6 +26,10 @@ export default function BroadcastComposer({ members, churchId }: {
     if (audience === 'new_converts') return m.source === 'new_convert';
     return true;
   });
+
+  const finalMembers = recipientLimit && typeof recipientLimit === 'number' && recipientLimit > 0 
+    ? filteredMembers.slice(0, recipientLimit) 
+    : filteredMembers;
   
   const audienceLabels = {
     all: 'All Contacts',
@@ -36,17 +41,17 @@ export default function BroadcastComposer({ members, churchId }: {
 
   const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!message.trim() || filteredMembers.length === 0 || sendingRef.current) return;
+    if (!message.trim() || finalMembers.length === 0 || sendingRef.current) return;
     
     sendingRef.current = true;
     setIsSending(true);
-    setProgress({ active: true, total: filteredMembers.length, sent: 0, failed: 0 });
+    setProgress({ active: true, total: finalMembers.length, sent: 0, failed: 0 });
     
     try {
       const tenantId = churchId; // church uuid
       let haltedReason = '';
 
-      for (const m of filteredMembers) {
+      for (const m of finalMembers) {
         try {
           if (!m.phone_number) {
             setProgress(p => ({ ...p, failed: p.failed + 1 }));
@@ -153,23 +158,38 @@ export default function BroadcastComposer({ members, churchId }: {
             <div>
               <h4 className="text-[13px] font-bold text-[#7A4F30] uppercase tracking-wider">Recipient Audience</h4>
               <p className="text-[12px] text-[#9A7E65] mt-1 font-medium leading-relaxed">
-                This message will be sent to <span className="text-[#B5622A] font-bold">{filteredMembers.length} {audienceLabels[audience]}</span> who have valid contact information.
+                This message will be sent to <span className="text-[#B5622A] font-bold">{finalMembers.length} {audienceLabels[audience]}</span> who have valid contact information.
               </p>
             </div>
           </div>
-          <div className="shrink-0 w-full sm:w-auto">
-            <select
-              value={audience}
-              onChange={(e: any) => setAudience(e.target.value)}
-              className="w-full sm:w-auto px-4 py-2 bg-white border border-[rgba(181,98,42,0.2)] rounded-lg text-sm font-bold text-[#1E1208] outline-none focus:border-[#B5622A] cursor-pointer shadow-sm disabled:opacity-50"
-              disabled={isSending}
-            >
-              <option value="all">All Contacts</option>
-              <option value="men">Men Only</option>
-              <option value="women">Women Only</option>
-              <option value="youth">Youth Only</option>
-              <option value="new_converts">New Converts</option>
-            </select>
+          <div className="shrink-0 w-full sm:w-auto flex items-center gap-3">
+            <div className="flex flex-col">
+              <label className="text-[9px] font-bold text-[#C8B89A] uppercase tracking-widest mb-1">Limit Count (optional)</label>
+              <input 
+                type="number"
+                placeholder="All"
+                value={recipientLimit}
+                onChange={(e) => setRecipientLimit(e.target.value === '' ? '' : Math.max(1, parseInt(e.target.value) || 0))}
+                className="w-20 px-3 py-2 bg-white border border-[rgba(181,98,42,0.2)] rounded-lg text-sm font-bold text-[#1E1208] outline-none focus:border-[#B5622A] shadow-sm disabled:opacity-50"
+                disabled={isSending}
+                min={1}
+              />
+            </div>
+            <div className="flex flex-col">
+              <label className="text-[9px] font-bold text-[#C8B89A] uppercase tracking-widest mb-1">Select Group</label>
+              <select
+                value={audience}
+                onChange={(e: any) => setAudience(e.target.value)}
+                className="w-full sm:w-auto px-4 py-2 bg-white border border-[rgba(181,98,42,0.2)] rounded-lg text-sm font-bold text-[#1E1208] outline-none focus:border-[#B5622A] cursor-pointer shadow-sm disabled:opacity-50"
+                disabled={isSending}
+              >
+                <option value="all">All Contacts</option>
+                <option value="men">Men Only</option>
+                <option value="women">Women Only</option>
+                <option value="youth">Youth Only</option>
+                <option value="new_converts">New Converts</option>
+              </select>
+            </div>
           </div>
         </div>
 
@@ -225,7 +245,7 @@ export default function BroadcastComposer({ members, churchId }: {
         <div className="pt-4">
           <button 
             type="submit"
-            disabled={filteredMembers.length === 0 || !message.trim() || isSending}
+            disabled={finalMembers.length === 0 || !message.trim() || isSending}
             className="w-full sm:w-auto px-10 py-4 bg-[#2B1A0E] text-[#F5E6CE] rounded-xl text-sm font-bold hover:bg-[#3D2614] transition-all disabled:opacity-40 disabled:cursor-not-allowed shadow-lg flex items-center justify-center gap-3 uppercase tracking-widest"
           >
             {isSending ? (
@@ -236,7 +256,7 @@ export default function BroadcastComposer({ members, churchId }: {
             ) : (
               <>
                 <Send className="w-4 h-4" />
-                Send Broadcast ({filteredMembers.length} {audienceLabels[audience]})
+                Send Broadcast ({finalMembers.length} {audienceLabels[audience]})
               </>
             )}
           </button>

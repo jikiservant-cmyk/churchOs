@@ -6,6 +6,8 @@ import {
   Cell,
   Tooltip as PieTooltip,
   ResponsiveContainer,
+  LineChart,
+  Line,
   BarChart,
   Bar,
   XAxis,
@@ -18,15 +20,42 @@ export function AdminCharts({
   genderData, 
   youthData,
   convertsData,
-  donationsData
+  donationsData,
+  attendanceData
 }: { 
   genderData: { name: string, value: number, color: string }[],
   youthData?: { name: string, value: number, color: string }[],
   convertsData: { month: string, count: number }[],
-  donationsData?: { month: string, amount: number }[]
+  donationsData?: { month: string, amount: number }[],
+  attendanceData?: { name: string, count: number }[]
 }) {
   return (
     <div className="space-y-5 mb-5">
+      {/* Attendance History */}
+      {attendanceData && (
+        <div className="bg-[#F0E6D3] border border-[rgba(90,55,20,0.13)] rounded-2xl p-6 shadow-sm flex flex-col">
+          <h4 style={{ fontFamily: "'Playfair Display', serif" }} className="text-lg font-bold text-[#1E1208] mb-4">General Attendance</h4>
+          <div className="flex-1 w-full" style={{ minWidth: 0, minHeight: 300 }}>
+            {attendanceData.every(d => d.count === 0) ? (
+              <div className="h-[300px] flex items-center justify-center text-[13px] text-[#9A7E65]">No attendance data available.</div>
+            ) : (
+              <ResponsiveContainer width="100%" height={300}>
+                <LineChart data={attendanceData} margin={{ top: 10, right: 30, left: 10, bottom: 0 }}>
+                  <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#9A7E65', fontWeight: 'bold' }} />
+                  <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#9A7E65', fontWeight: 'bold' }} />
+                  <BarTooltip 
+                    cursor={{ fill: 'rgba(90,55,20,0.05)' }}
+                    contentStyle={{ backgroundColor: '#F0E6D3', border: '1px solid rgba(90,55,20,0.13)', borderRadius: '8px', fontSize: '13px', fontWeight: 'bold' }}
+                    formatter={(value: any) => [`${(Number(value) || 0).toLocaleString()} people`, 'Attended']}
+                  />
+                  <Line type="monotone" dataKey="count" stroke="#B5622A" strokeWidth={3} dot={{ r: 4, fill: '#B5622A' }} name="Attendance" />
+                </LineChart>
+              </ResponsiveContainer>
+            )}
+          </div>
+        </div>
+      )}
+
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
         {/* Gender Distribution */}
         <div className="bg-[#F0E6D3] border border-[rgba(90,55,20,0.13)] rounded-2xl p-6 shadow-sm flex flex-col">

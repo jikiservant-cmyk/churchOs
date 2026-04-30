@@ -11,11 +11,13 @@ interface Member {
 }
 
 export default function CheckInClient({
+  churchSlug,
   eventId,
   members,
   attendedMemberIds: initialAttendedIds,
   eventStatus
 }: {
+  churchSlug: string;
   eventId: string;
   members: Member[];
   attendedMemberIds: Set<string>;
@@ -42,7 +44,7 @@ export default function CheckInClient({
   const handleCheckIn = async (memberId: string) => {
     setIsProcessing(memberId);
     try {
-      const result = await markAttendance(eventId, memberId);
+      const result = await markAttendance(churchSlug, eventId, memberId);
       if (result.success) {
         setAttendedIds(prev => new Set([...Array.from(prev), memberId]));
         setSearch(''); // Clear search after check-in
@@ -55,7 +57,7 @@ export default function CheckInClient({
   const handleUndo = async (memberId: string) => {
     setIsProcessing(memberId);
     try {
-      const result = await removeAttendance(eventId, memberId);
+      const result = await removeAttendance(churchSlug, eventId, memberId);
       if (result.success) {
         setAttendedIds(prev => {
           const next = new Set(prev);

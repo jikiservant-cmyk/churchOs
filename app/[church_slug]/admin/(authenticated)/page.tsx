@@ -132,9 +132,18 @@ export default async function AdminDashboard({
   }
   const donationsData = Object.keys(donationsByMonth).map(month => ({ month, amount: donationsByMonth[month] }));
 
+  // Attendance History
+  const attendanceData = events.slice(0, 10).reverse().map(e => ({
+    name: e.event_date.split('-').slice(1).join('/'), // short date
+    count: e.attending_count || 0
+  }));
+  
+  const totalAttended = events.slice(0, 4).reduce((acc, curr) => acc + (curr.attending_count || 0), 0);
+  const avgAttendance = events.length > 0 ? Math.round(totalAttended / Math.min(events.length, 4)) : 0;
+
   const topStats = [
     { label: "Total Members", value: realMemberCount.toLocaleString(), note: "Active directory" },
-    { label: "Open Prayers", value: prayers.filter(p => p.status !== 'answered').length.toString(), note: "Awaiting intercession" },
+    { label: "Avg Attendance", value: avgAttendance.toLocaleString(), note: "Last 4 recent services" },
   ];
 
   return (
@@ -158,7 +167,7 @@ export default async function AdminDashboard({
       </div>
 
       {/* Charts Row */}
-      <AdminCharts genderData={genderData} youthData={youthData} convertsData={convertsData} donationsData={donationsData} />
+      <AdminCharts genderData={genderData} youthData={youthData} convertsData={convertsData} donationsData={donationsData} attendanceData={attendanceData} />
 
       {/* Events Row (Now full width since Small Groups is removed) */}
       <div className="mb-5">

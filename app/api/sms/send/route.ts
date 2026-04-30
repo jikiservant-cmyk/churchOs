@@ -21,9 +21,20 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Unauthorized access' }, { status: 401 });
     }
 
-    // 2. Verify Tenant (Church) Ownership
-    // We check if the authenticated user has access to this churchId.
-    // If RLS is enabled, this query will naturally return null if they don't belong to it.
+    // 2. Verify Tenant (Church) Ownership Explicitly via Admin Profile
+    // We check if the authenticated user explicitly belongs to this churchId via admin_profiles.
+    const { data: adminProfile } = await supabaseUserClient
+      .from('admin_profiles')
+      .select('church_id')
+      .eq('id', user.id)
+      .eq('church_id', churchId)
+      .maybeSingle();
+
+    if (!adminProfile) {
+      console.error(`[SMS API] Explicit multi-tenancy check failed. User ${user.id} attempted to send for church ${churchId}`);
+      return NextResponse.json({ error: 'Access denied: You are not authorized as an admin for this church.' }, { status: 403 });
+    }
+    
     const { data: authorizedChurch, error: tenantError } = await supabaseUserClient
       .schema('church')
       .from('churches')
@@ -32,8 +43,8 @@ export async function POST(req: Request) {
       .maybeSingle();
 
     if (tenantError || !authorizedChurch) {
-      console.error(`[SMS API] Multi-tenancy check failed. User ${user.id} attempted to send for church ${churchId}`);
-      return NextResponse.json({ error: 'Access denied: You do not have permission to send for this church.' }, { status: 403 });
+      console.error(`[SMS API] Church lookup failed for ${churchId}`);
+      return NextResponse.json({ error: 'Church configuration not found.' }, { status: 404 });
     }
 
     // 3. Prepaid Balance Guard

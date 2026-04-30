@@ -9,10 +9,15 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Missing required parameters' }, { status: 400 });
     }
 
-    const supabase = await createSupabaseServerClient();
+    const webhookSecret = process.env.WEBHOOK_SECRET;
+    const authHeader = req.headers.get('authorization');
     
-    // Server-side security check (Only admins/system can perform topups typically, 
-    // but in a real webhook, you would verify the provider signature)
+    // Server-side security check: require a valid webhook secret
+    if (!webhookSecret || authHeader !== `Bearer ${webhookSecret}`) {
+      return NextResponse.json({ error: 'Unauthorized webhook' }, { status: 401 });
+    }
+
+    const supabase = await createSupabaseServerClient();
 
     const idempotencyKey = `topup_${provider_reference}`;
 

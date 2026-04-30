@@ -1,10 +1,15 @@
 import { createClient } from '@/lib/supabase/server';
-import { Users, Plus, Search, MoreVertical } from 'lucide-react';
-import { addMember } from './actions';
+import { Users, Plus, MoreVertical, Pencil } from 'lucide-react';
+import { addMember, bulkAddMembers } from './actions';
+import CSVUploader from '@/components/CSVUploader';
+import SearchInput from '@/components/SearchInput';
+import Link from 'next/link';
+
+import PaginatedMembersList from '@/components/PaginatedMembersList';
 
 export default async function MembersPage(props: {
   params: Promise<{ church_slug: string }>;
-  searchParams: Promise<{ error?: string }>;
+  searchParams: Promise<{ error?: string; q?: string }>;
 }) {
   const resolvedParams = await props.params;
   const searchParams = await props.searchParams;
@@ -19,20 +24,29 @@ export default async function MembersPage(props: {
     .maybeSingle();
 
   // Fetch members. 
-  const { data: members, error } = await supabase
+  let query = supabase
     .schema('church')
     .from('members')
     .select('*')
-    .eq('church_id', church?.id || '00000000-0000-0000-0000-000000000000')
+    .eq('church_id', church?.id || '00000000-0000-0000-0000-000000000000');
+
+  if (searchParams.q) {
+    query = query.ilike('full_name', `%${searchParams.q}%`);
+  }
+
+  const { data: members, error } = await query
     .order('created_at', { ascending: false })
-    .limit(50);
+    .limit(200);
 
   return (
     <div className="max-w-7xl mx-auto space-y-6">
       {/* Header */}
-      <div className="mb-8">
-        <h1 style={{ fontFamily: "'Playfair Display', serif" }} className="text-3xl font-bold text-[#1E1208]">Members</h1>
-        <p className="text-[13px] text-[#9A7E65] mt-1.5 font-medium">Manage your congregation, families, and ministries.</p>
+      <div className="mb-8 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div>
+          <h1 style={{ fontFamily: "'Playfair Display', serif" }} className="text-3xl font-bold text-[#1E1208]">Members</h1>
+          <p className="text-[13px] text-[#9A7E65] mt-1.5 font-medium">Manage your congregation, families, and ministries.</p>
+        </div>
+        <CSVUploader churchSlug={resolvedParams.church_slug} type="members" onUpload={bulkAddMembers} />
       </div>
 
       {searchParams.error && (
@@ -45,60 +59,18 @@ export default async function MembersPage(props: {
         {/* Members List (Left Column) */}
         <div className="lg:col-span-2 bg-[#F0E6D3] rounded-2xl border border-[rgba(90,55,20,0.13)] overflow-hidden flex flex-col shadow-sm">
           <div className="p-5 border-b border-[rgba(90,55,20,0.08)] flex items-center gap-4">
-            <div className="relative flex-1">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[#9A7E65]" />
-              <input 
-                type="text" 
-                placeholder="Search members..." 
-                className="w-full pl-9 pr-4 py-2.5 bg-[rgba(255,220,170,0.05)] border border-[rgba(90,55,20,0.1)] focus:border-[#B5622A] rounded-xl text-sm outline-none transition-colors font-medium text-[#1E1208] placeholder:text-[#C8B89A]"
-              />
-            </div>
+            <SearchInput placeholder="Search members by name..." />
             <button className="px-5 py-2.5 bg-[rgba(90,55,20,0.05)] text-[#1E1208] text-sm font-bold rounded-xl hover:bg-[rgba(90,55,20,0.1)] transition-colors">
               Filter
             </button>
           </div>
 
           <div className="flex-1">
-            {error ? (
-              <div className="p-8 text-center text-[#B5622A] font-bold">
-                Failed to load members: {error.message}
-              </div>
-            ) : !members || members.length === 0 ? (
-              <div className="p-12 text-center flex flex-col items-center justify-center">
-                <div className="w-12 h-12 bg-[rgba(90,55,20,0.05)] rounded-full flex items-center justify-center mb-3">
-                  <Users className="w-6 h-6 text-[#C8B89A]" />
-                </div>
-                <h3 className="text-[#1E1208] font-bold">No members found</h3>
-                <p className="text-[#9A7E65] text-sm mt-1">Add your first member using the form.</p>
-              </div>
-            ) : (
-              <ul className="divide-y divide-[rgba(90,55,20,0.08)]">
-                {members.map((member) => (
-                  <li key={member.id} className="p-5 hover:bg-[rgba(90,55,20,0.02)] transition-colors flex items-center justify-between group">
-                    <div className="flex items-center gap-4">
-                      <div className="w-10 h-10 rounded-full bg-[rgba(90,55,20,0.1)] text-[#7A4F30] flex items-center justify-center font-bold text-sm border border-[rgba(90,55,20,0.05)]">
-                        {member.full_name?.[0] || '?'}
-                      </div>
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <p className="font-bold text-[#1E1208]">{member.full_name}</p>
-                          {member.is_youth && (
-                            <span className="px-1.5 py-0.5 rounded-md bg-[rgba(181,98,42,0.12)] text-[#B5622A] text-[10px] uppercase font-bold tracking-wider">Youth</span>
-                          )}
-                        </div>
-                        <p className="text-[11px] font-medium text-[#9A7E65] mt-0.5">
-                           {member.phone_number || member.email || 'No contact info'} 
-                           {member.gender && ` • ${member.gender.toUpperCase()}`}
-                        </p>
-                      </div>
-                    </div>
-                    <button className="p-2 text-[#C8B89A] hover:text-[#1E1208] transition-all">
-                      <MoreVertical className="w-5 h-5" />
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
+            <PaginatedMembersList 
+              members={members || []} 
+              churchSlug={resolvedParams.church_slug} 
+              error={error} 
+            />
           </div>
         </div>
 

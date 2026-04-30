@@ -14,12 +14,13 @@ interface Member {
 }
 
 interface UsherDashboardClientProps {
+  churchSlug: string;
   event: ChurchEvent;
   members: Member[];
   initialLogs: { member_id: string; attendance_status: string }[];
 }
 
-export function UsherDashboardClient({ event, members, initialLogs }: UsherDashboardClientProps) {
+export function UsherDashboardClient({ churchSlug, event, members, initialLogs }: UsherDashboardClientProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [logs, setLogs] = useState(initialLogs);
   const [processingId, setProcessingId] = useState<string | null>(null);
@@ -48,7 +49,7 @@ export function UsherDashboardClient({ event, members, initialLogs }: UsherDashb
     try {
       if (existingLog) {
         // Remove attendance
-        const result = await removeAttendance(event.id, memberId);
+        const result = await removeAttendance(churchSlug, event.id, memberId);
         if ('error' in result) {
           toast.error(result.error);
         } else {
@@ -57,7 +58,7 @@ export function UsherDashboardClient({ event, members, initialLogs }: UsherDashb
         }
       } else {
         // Mark as present
-        const result = await markAttendance(event.id, memberId, 'present');
+        const result = await markAttendance(churchSlug, event.id, memberId, 'present');
         if ('error' in result) {
           toast.error(result.error);
         } else {

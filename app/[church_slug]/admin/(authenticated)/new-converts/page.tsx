@@ -1,10 +1,15 @@
 import { createClient } from '@/lib/supabase/server';
-import { UserPlus, Plus, Search, MoreVertical } from 'lucide-react';
-import { addNewConvert } from './actions';
+import { UserPlus, Plus, MoreVertical, Pencil } from 'lucide-react';
+import { addNewConvert, bulkAddNewConverts } from './actions';
+import CSVUploader from '@/components/CSVUploader';
+import SearchInput from '@/components/SearchInput';
+import Link from 'next/link';
+
+import PaginatedConvertsList from '@/components/PaginatedConvertsList';
 
 export default async function NewConvertsPage(props: {
   params: Promise<{ church_slug: string }>;
-  searchParams: Promise<{ error?: string }>;
+  searchParams: Promise<{ error?: string; q?: string }>;
 }) {
   const resolvedParams = await props.params;
   const searchParams = await props.searchParams;
@@ -18,13 +23,19 @@ export default async function NewConvertsPage(props: {
     .eq('slug', Object_slug)
     .maybeSingle();
 
-  const { data: converts, error } = await supabase
+  let query = supabase
     .schema('church')
     .from('new_converts')
     .select('*')
-    .eq('church_id', church?.id || '00000000-0000-0000-0000-000000000000')
+    .eq('church_id', church?.id || '00000000-0000-0000-0000-000000000000');
+
+  if (searchParams.q) {
+    query = query.ilike('name', `%${searchParams.q}%`);
+  }
+
+  const { data: converts, error } = await query
     .order('id', { ascending: false })
-    .limit(50);
+    .limit(200);
 
   return (
     <div className="max-w-6xl mx-auto space-y-6">
@@ -33,6 +44,7 @@ export default async function NewConvertsPage(props: {
           <h1 className="text-2xl font-bold text-slate-900">New Converts</h1>
           <p className="text-slate-500 text-sm mt-1">Manage and follow up with new believers.</p>
         </div>
+        <CSVUploader churchSlug={Object_slug} type="new-converts" onUpload={bulkAddNewConverts} />
       </div>
 
       {searchParams.error && (
@@ -45,52 +57,18 @@ export default async function NewConvertsPage(props: {
         {/* Converts List (Left Column) */}
         <div className="lg:col-span-2 bg-white rounded-xl shadow-[0_4px_24px_-8px_rgba(0,0,0,0.05)] border border-slate-100 overflow-hidden flex flex-col">
           <div className="p-5 border-b border-slate-100 flex items-center gap-4">
-            <div className="relative flex-1">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-              <input 
-                type="text" 
-                placeholder="Search converts..." 
-                className="w-full pl-9 pr-4 py-2.5 bg-slate-50 border border-slate-200 focus:border-slate-300 rounded-xl text-sm focus:ring-0 outline-none transition-colors font-medium text-slate-900 placeholder:text-slate-400"
-              />
-            </div>
+            <SearchInput placeholder="Search converts by name..." />
             <button className="px-5 py-2.5 bg-slate-100 text-slate-700 text-sm font-bold rounded-xl hover:bg-slate-200 transition-colors">
               Filter
             </button>
           </div>
 
           <div className="flex-1 overflow-auto">
-            {error ? (
-              <div className="p-8 text-center text-[#FF4747] font-bold">
-                Failed to load converts: {error.message}
-              </div>
-            ) : !converts || converts.length === 0 ? (
-              <div className="p-12 text-center flex flex-col items-center justify-center">
-                <div className="w-12 h-12 bg-slate-50 rounded-full flex items-center justify-center mb-3">
-                  <UserPlus className="w-6 h-6 text-slate-400" />
-                </div>
-                <h3 className="text-slate-900 font-bold">No new converts yet</h3>
-                <p className="text-slate-500 text-sm mt-1">Add your first new convert using the form.</p>
-              </div>
-            ) : (
-              <ul className="divide-y divide-slate-100">
-                {converts.map((c) => (
-                  <li key={c.id} className="p-5 hover:bg-slate-50 transition-colors flex items-center justify-between group">
-                    <div className="flex items-center gap-4">
-                      <div className="w-10 h-10 rounded-full bg-cyan-50 text-cyan-600 flex items-center justify-center font-bold text-sm border border-cyan-100">
-                        {c.name?.[0] || '?'}
-                      </div>
-                      <div>
-                        <p className="font-bold text-slate-900">{c.name}</p>
-                        <p className="text-xs font-medium text-slate-500 mt-0.5">{c.contact}</p>
-                      </div>
-                    </div>
-                    <button className="p-2 text-slate-400 hover:text-slate-900 rounded-lg opacity-0 group-hover:opacity-100 transition-all">
-                      <MoreVertical className="w-5 h-5" />
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
+            <PaginatedConvertsList 
+              converts={converts || []} 
+              churchSlug={Object_slug} 
+              error={error} 
+            />
           </div>
         </div>
 
