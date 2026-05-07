@@ -1,7 +1,96 @@
 'use server';
 
-import { createClient } from '@/lib/supabase/server';
+import { createClient, createAdminClient } from '@/lib/supabase/server';
 import { revalidatePath } from 'next/cache';
+
+export async function initiateRelworxPayment(formData: FormData) {
+  try {
+    const churchId = formData.get('churchId') as string;
+    const amount = parseInt(formData.get('amount') as string, 10) || 5000;
+    const phoneNumber = formData.get('phoneNumber') as string;
+
+    if (!churchId || !phoneNumber) {
+      return { error: 'Missing required fields' };
+    }
+
+    const apiKey = process.env.RELWORX_API_KEY;
+    const accountNo = process.env.RELWORX_ACCOUNT_NO;
+
+    if (!apiKey || !accountNo) {
+      console.error('[Relworx] API credentials missing');
+      return { error: 'Payment service not configured' };
+    }
+
+    // 1. Create a pending transaction in our DB
+    // Use Admin Client to bypass RLS for creating pending transactions
+    const supabase = await createAdminClient();
+    const referenceCode = `REL_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+
+    const { error: txError } = await supabase.from('wallet_transactions').insert({
+      tenant_id: churchId,
+      amount: amount,
+      type: 'TOPUP',
+      description: `Relworx Top-up for ${phoneNumber}`,
+      reference_code: referenceCode,
+      status: 'pending',
+      product: 'sms',
+      revenue_ugx: 0,
+      created_by: 'system',
+    });
+
+    if (txError) {
+      console.error('[Relworx] Failed to create pending transaction:', txError);
+      return { 
+        error: `Database error: ${txError.message} (${txError.code})`,
+        details: txError
+      };
+    }
+
+    // 2. Call Relworx API
+    const response = await fetch('https://payments.relworx.com/api/mobile_money/request', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/vnd.relworx.v2',
+        'Authorization': `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        account_no: accountNo,
+        msisdn: phoneNumber,
+        amount: amount,
+        currency: 'UGX',
+        customer_reference: referenceCode,
+        description: 'ChurchOS Wallet Top-up',
+      }),
+    });
+
+    const result = await response.json();
+
+    if (!response.ok) {
+      console.error('[Relworx] API Error:', result);
+      // Update transaction status to failed
+      await supabase
+        .from('wallet_transactions')
+        .update({ status: 'failed' })
+        .eq('reference_code', referenceCode);
+        
+      return { error: result.message || 'Payment request failed' };
+    }
+
+    // 3. Update transaction with Relworx internal reference
+    await supabase
+      .from('wallet_transactions')
+      .update({ 
+        idempotency_key: result.internal_reference 
+      })
+      .eq('reference_code', referenceCode);
+
+    return { success: true, message: 'Payment prompt sent to your phone!' };
+  } catch (err: any) {
+    console.error('[Relworx] Unexpected error:', err);
+    return { error: 'An unexpected error occurred' };
+  }
+}
 
 export async function topUpWallet(formData: FormData) {
   try {

@@ -18,11 +18,27 @@ export function CopyPortalLink({ churchSlug, passkey }: CopyPortalLinkProps) {
     const textToCopy = `Church Attendance Portal\nLink: ${portalUrl}\nPasskey: ${passkey}`;
     
     try {
-      await navigator.clipboard.writeText(textToCopy);
+      // Fallback for older browsers or restricted contexts
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(textToCopy);
+      } else {
+        const textArea = document.createElement("textarea");
+        textArea.value = textToCopy;
+        textArea.style.position = "fixed";
+        textArea.style.left = "-9999px";
+        textArea.style.top = "0";
+        document.body.appendChild(textArea);
+        textArea.focus();
+        textArea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textArea);
+      }
+      
       setCopied(true);
       toast.success('Portal link and passkey copied to clipboard');
       setTimeout(() => setCopied(false), 2000);
     } catch (err) {
+      console.error('Copy failed:', err);
       toast.error('Failed to copy link');
     }
   };

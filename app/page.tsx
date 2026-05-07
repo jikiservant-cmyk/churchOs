@@ -18,36 +18,39 @@ export default async function RootLoginPage({
   let redirectTo: string | null = null;
 
   // 1. Check if user is already logged in
-  try {
-    const { data: { user } } = await supabase.auth.getUser();
-    
-    if (user) {
-      // Attempt to find their church via their profile
-      const { data: profile } = await supabase
-        .from('admin_profiles')
-        .select('role, tenant_id')
-        .eq('id', user.id)
-        .maybeSingle();
+  // ONLY redirect if there's no error in the URL (to avoid redirect loops)
+  if (!loginError) {
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      
+      if (user) {
+        // Attempt to find their church via their profile
+        const { data: profile } = await supabase
+          .from('admin_profiles')
+          .select('role, tenant_id')
+          .eq('id', user.id)
+          .maybeSingle();
 
-      // Verify they are a pastor
-      const churchId = profile?.tenant_id;
-      if (profile?.role === 'pastor' && churchId) {
-         const { data: church } = await supabase
-           .schema('church')
-           .from('churches')
-           .select('slug')
-           .eq('id', churchId)
-           .maybeSingle();
-           
-         if (church?.slug) {
-           redirectTo = `/${church.slug}/admin`;
-         }
-      } else if (profile && profile.role !== 'pastor') {
-         loginError = 'Access Denied: You do not have pastor permissions';
+        // Verify they are a pastor
+        const churchId = profile?.tenant_id;
+        if (profile?.role === 'pastor' && churchId) {
+           const { data: church } = await supabase
+             .schema('church')
+             .from('churches')
+             .select('slug')
+             .eq('id', churchId)
+             .maybeSingle();
+             
+           if (church?.slug) {
+             redirectTo = `/${church.slug}/admin`;
+           }
+        } else if (profile && profile.role !== 'pastor') {
+           loginError = 'Access Denied: You do not have pastor permissions';
+        }
       }
+    } catch (err: any) {
+      console.error('[RootPage] Auth check error:', err);
     }
-  } catch (err: any) {
-    console.error('[RootPage] Auth check error:', err);
   }
 
   // Perform redirect if needed, outside of try/catch

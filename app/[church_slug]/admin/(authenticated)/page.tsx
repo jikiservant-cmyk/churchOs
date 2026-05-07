@@ -49,8 +49,22 @@ export default async function AdminDashboard({
   })) || [];
 
   // Fetch Events
-  const { data: dbEvents } = await supabase.schema('church').from('events').select('*').eq('church_id', church.id).order('created_at', { ascending: true }).limit(5);
+  const { data: dbEvents } = await supabase
+    .schema('church')
+    .from('events')
+    .select('*')
+    .eq('church_id', church.id)
+    .order('event_date', { ascending: false })
+    .limit(5);
   const events = dbEvents || [];
+
+  // Map events for display
+  const mappedEvents = events.map(e => ({
+    title: e.name,
+    day: new Date(e.event_date).toLocaleDateString('en-US', { weekday: 'short' }),
+    start_time: e.start_time?.slice(0, 5) || 'TBD',
+    attending_count: e.attending_count || 0
+  }));
 
   // Fetch Prayers
   const { data: dbPrayers } = await supabase.schema('church').from('prayers').select('*').eq('church_id', church.id).order('created_at', { ascending: false }).limit(5);
@@ -147,18 +161,18 @@ export default async function AdminDashboard({
   ];
 
   return (
-    <div className="max-w-7xl mx-auto">
+    <div className="max-w-7xl mx-auto space-y-6">
       {/* Greetings */}
       <DashboardGreeting pastorName={pastorName} />
 
       {/* Stats Grid */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 gap-4 mb-6">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         {topStats.map((s, i) => (
           <div key={i} className="bg-[#F0E6D3] border border-[rgba(90,55,20,0.13)] rounded-2xl p-6 transition-all hover:translate-y-[-2px] hover:shadow-lg">
             <p className="text-[10px] font-bold text-[#C8B89A] uppercase tracking-widest mb-3">
               {s.label}
             </p>
-            <h3 style={{ fontFamily: "'Playfair Display', serif" }} className="text-3xl font-bold text-[#1E1208] leading-none mb-2">
+            <h3 style={{ fontFamily: "'Playfair Display', serif" }} className="text-2xl sm:text-3xl font-bold text-[#1E1208] leading-none mb-2">
               {s.value}
             </h3>
             <p className="text-[11px] text-[#9A7E65] font-medium">{s.note}</p>
@@ -167,25 +181,27 @@ export default async function AdminDashboard({
       </div>
 
       {/* Charts Row */}
-      <AdminCharts genderData={genderData} youthData={youthData} convertsData={convertsData} donationsData={donationsData} attendanceData={attendanceData} />
+      <div className="overflow-hidden">
+        <AdminCharts genderData={genderData} youthData={youthData} convertsData={convertsData} donationsData={donationsData} attendanceData={attendanceData} />
+      </div>
 
       {/* Events Row (Now full width since Small Groups is removed) */}
-      <div className="mb-5">
+      <div>
         <div className="bg-[#F0E6D3] border border-[rgba(90,55,20,0.13)] rounded-2xl overflow-hidden shadow-sm">
           <div className="px-6 py-5 flex items-center justify-between">
             <h4 style={{ fontFamily: "'Playfair Display', serif" }} className="text-lg font-bold text-[#1E1208]">Upcoming Events</h4>
             <button className="text-[11px] font-bold text-[#9A7E65] hover:text-[#B5622A] transition-colors uppercase tracking-wider">View all</button>
           </div>
-          <div className="border-t border-[rgba(90,55,20,0.08)]">
-            {events.length === 0 ? (
-              <div className="px-6 py-8 text-center border-b border-[rgba(90,55,20,0.08)]">
+          <div className="border-t border-[rgba(90,55,20,0.08)] divide-y divide-[rgba(90,55,20,0.08)]">
+            {mappedEvents.length === 0 ? (
+              <div className="px-6 py-8 text-center">
                 <p className="text-[13px] text-[#9A7E65]">No upcoming events scheduled.</p>
               </div>
-            ) : events.map((e, index) => (
-              <div key={index} className="px-6 py-4 flex items-center gap-4 border-b border-[rgba(90,55,20,0.08)] last:border-0 hover:bg-[rgba(90,55,20,0.02)] transition-colors">
+            ) : mappedEvents.map((e, index) => (
+              <div key={index} className="px-6 py-4 flex items-center gap-4 hover:bg-[rgba(90,55,20,0.02)] transition-colors">
                 <div className="w-11 h-11 flex flex-col items-center justify-center bg-[#F5EAD8] border border-[rgba(181,98,42,0.18)] rounded-xl shrink-0">
                   <span className="text-[9px] font-bold text-[#B5622A] uppercase tracking-widest leading-none mb-0.5">{e.day}</span>
-                  <span className="text-[11px] font-bold text-[#9A7E65]">{e.start_time?.split(':')[0] || 'TBD'}</span>
+                  <span className="text-[11px] font-bold text-[#9A7E65]">{e.start_time}</span>
                 </div>
                 <div className="flex-1 min-w-0">
                   <p className="text-[14px] font-bold text-[#1E1208] truncate">{e.title}</p>
@@ -202,20 +218,20 @@ export default async function AdminDashboard({
       </div>
 
       {/* Members + Prayer Row */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 mb-5">
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
         {/* New Members */}
         <div className="lg:col-span-5 bg-[#F0E6D3] border border-[rgba(90,55,20,0.13)] rounded-2xl overflow-hidden shadow-sm">
           <div className="px-6 py-5 flex items-center justify-between">
             <h4 style={{ fontFamily: "'Playfair Display', serif" }} className="text-lg font-bold text-[#1E1208]">New Members</h4>
             <button className="text-[11px] font-bold text-[#9A7E65] hover:text-[#B5622A] transition-colors uppercase tracking-wider">View all</button>
           </div>
-          <div className="border-t border-[rgba(90,55,20,0.08)]">
+          <div className="border-t border-[rgba(90,55,20,0.08)] divide-y divide-[rgba(90,55,20,0.08)]">
             {mappedMembers.length === 0 ? (
-              <div className="px-6 py-8 text-center border-b border-[rgba(90,55,20,0.08)]">
+              <div className="px-6 py-8 text-center">
                 <p className="text-[13px] text-[#9A7E65]">No new members this month.</p>
               </div>
             ) : mappedMembers.map((m, index) => (
-              <div key={index} className="px-6 py-4 flex items-center gap-3 border-b border-[rgba(90,55,20,0.08)] last:border-0 hover:bg-[rgba(90,55,20,0.02)] transition-colors">
+              <div key={index} className="px-6 py-4 flex items-center gap-3 hover:bg-[rgba(90,55,20,0.02)] transition-colors">
                 <div className="w-9 h-9 rounded-full bg-[rgba(90,55,20,0.12)] flex items-center justify-center text-[13px] font-bold text-[#7A4F30] shrink-0">
                   {m.name[0]}
                 </div>
@@ -223,7 +239,7 @@ export default async function AdminDashboard({
                    <p className="text-[14px] font-bold text-[#1E1208] truncate">{m.name}</p>
                    <p className="text-[12px] text-[#9A7E65]">Joined {m.since}</p>
                 </div>
-                <span className="px-2 py-0.5 bg-[rgba(90,55,20,0.08)] text-[10px] font-bold text-[#9A7E65] rounded-full uppercase tracking-wider">Member</span>
+                <span className="px-2 py-0.5 bg-[rgba(90,55,20,0.08)] text-[10px] font-bold text-[#9A7E65] rounded-full uppercase tracking-wider shrink-0">Member</span>
               </div>
             ))}
           </div>
@@ -235,13 +251,13 @@ export default async function AdminDashboard({
             <h4 style={{ fontFamily: "'Playfair Display', serif" }} className="text-lg font-bold text-[#1E1208]">Prayer Wall</h4>
             <button className="px-4 py-1.5 bg-[#2B1A0E] text-[#F5E6CE] text-[11px] font-bold rounded-lg hover:bg-[#3D2614] transition-colors uppercase tracking-widest">+ Add</button>
           </div>
-          <div className="border-t border-[rgba(90,55,20,0.08)]">
+          <div className="border-t border-[rgba(90,55,20,0.08)] divide-y divide-[rgba(90,55,20,0.08)]">
             {prayers.length === 0 ? (
-              <div className="px-6 py-8 text-center border-b border-[rgba(90,55,20,0.08)]">
+              <div className="px-6 py-8 text-center">
                 <p className="text-[13px] text-[#9A7E65]">No open prayer requests.</p>
               </div>
             ) : prayers.map((p, index) => (
-              <div key={index} className="px-6 py-4 flex flex-start gap-3 border-b border-[rgba(90,55,20,0.08)] last:border-0 hover:bg-[rgba(90,55,20,0.02)] transition-colors">
+              <div key={index} className="px-6 py-4 flex flex-start gap-3 hover:bg-[rgba(90,55,20,0.02)] transition-colors">
                  <div className="mt-2 w-1.5 h-1.5 rounded-full bg-[rgba(90,55,20,0.2)] shrink-0" />
                  <div className="flex-1 min-w-0">
                     <p className="text-[11px] font-bold text-[#9A7E65] mb-0.5">
@@ -249,7 +265,7 @@ export default async function AdminDashboard({
                     </p>
                     <p className="text-[13px] text-[#1E1208] leading-relaxed font-medium">{p.text}</p>
                  </div>
-                 <button className="self-center px-3 py-1 border border-[rgba(90,55,20,0.2)] text-[10px] font-bold text-[#9A7E65] rounded-lg hover:border-[#B5622A] hover:text-[#B5622A] hover:bg-[rgba(181,98,42,0.07)] transition-all">Answered?</button>
+                 <button className="self-center px-3 py-1 border border-[rgba(90,55,20,0.2)] text-[10px] font-bold text-[#9A7E65] rounded-lg hover:border-[#B5622A] hover:text-[#B5622A] hover:bg-[rgba(181,98,42,0.07)] transition-all shrink-0">Answered?</button>
               </div>
             ))}
           </div>

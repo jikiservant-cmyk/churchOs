@@ -130,9 +130,9 @@ export default async function AdminLayout({
       {/* Main Content */}
       <main className="flex-1 flex flex-col min-w-0 max-h-screen overflow-hidden">
         {/* Top Header */}
-        <header className="h-16 lg:h-20 bg-transparent flex items-center justify-between px-8 md:px-12 relative z-10">
-          <div className="flex flex-col">
-            <h1 style={{ fontFamily: "'Playfair Display', serif" }} className="text-xl font-bold text-[#1E1208] md:hidden">
+        <header className="h-16 lg:h-20 bg-transparent flex items-center justify-between px-6 md:px-12 relative z-10">
+          <div className="flex flex-col ml-12 md:ml-0">
+            <h1 style={{ fontFamily: "'Playfair Display', serif" }} className="text-lg font-bold text-[#1E1208] md:hidden truncate max-w-[180px]">
               {church.name}
             </h1>
           </div>

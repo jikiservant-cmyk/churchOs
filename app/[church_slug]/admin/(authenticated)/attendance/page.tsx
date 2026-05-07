@@ -60,31 +60,31 @@ export default async function AttendancePage(props: {
   return (
     <div className="max-w-6xl mx-auto space-y-8 pb-12">
       {/* Header */}
-      <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
+      <div className="flex flex-col md:flex-row md:items-end justify-between gap-6">
         <div>
-          <h1 style={{ fontFamily: "'Playfair Display', serif" }} className="text-3xl font-bold text-[#1E1208]">
+          <h1 style={{ fontFamily: "'Playfair Display', serif" }} className="text-2xl md:text-3xl font-bold text-[#1E1208]">
             Attendance Tracking
           </h1>
-          <p className="text-[#9A7E65] mt-1 text-[13px] font-medium tracking-wide flex items-center gap-2 uppercase">
+          <p className="text-[#9A7E65] mt-1 text-[11px] md:text-[13px] font-medium tracking-wide flex items-center gap-2 uppercase">
             <Activity className="w-3.5 h-3.5" />
             Manage services and check-ins
           </p>
         </div>
 
         {/* Quick Stats */}
-        <div className="grid grid-cols-2 gap-3">
-           <div className="bg-[#FAF7F0] border border-[#E9E1D2] rounded-xl p-3 px-6 shadow-sm">
-             <p className="text-[10px] font-bold text-[#9A7E65] uppercase tracking-widest mb-1">Active Services</p>
-             <p className="text-2xl font-bold text-[#B5622A]">{activeEvents.length}</p>
+        <div className="grid grid-cols-2 gap-3 w-full md:w-auto">
+           <div className="bg-[#FAF7F0] border border-[#E9E1D2] rounded-2xl p-4 shadow-sm flex-1">
+             <p className="text-[9px] font-bold text-[#9A7E65] uppercase tracking-widest mb-1">Active</p>
+             <p className="text-xl font-black text-[#B5622A]">{activeEvents.length}</p>
            </div>
-           <div className="bg-[#FAF7F0] border border-[#E9E1D2] rounded-xl p-3 px-6 shadow-sm">
-             <p className="text-[10px] font-bold text-[#9A7E65] uppercase tracking-widest mb-1">Total Logs</p>
-             <p className="text-2xl font-bold text-[#1E1208]">{events?.reduce((acc, e) => acc + (e.attending_count || 0), 0) || 0}</p>
+           <div className="bg-[#FAF7F0] border border-[#E9E1D2] rounded-2xl p-4 shadow-sm flex-1">
+             <p className="text-[9px] font-bold text-[#9A7E65] uppercase tracking-widest mb-1">Total Logs</p>
+             <p className="text-xl font-black text-[#1E1208]">{events?.reduce((acc, e) => acc + (e.attending_count || 0), 0) || 0}</p>
            </div>
         </div>
       </div>
 
-      <div className="flex items-center justify-end gap-3">
+      <div className="flex items-center justify-end gap-3 pt-2">
         <CopyPortalLink churchSlug={church_slug} passkey={church.passkey || '1234'} />
       </div>
 
@@ -171,9 +171,12 @@ export default async function AttendancePage(props: {
           <CheckCircle2 className="w-4 h-4" />
           Recent Services (Completed)
         </h3>
-        <div className="bg-[#FAF7F0] border border-[#E9E1D2] rounded-2xl overflow-hidden shadow-sm text-[13px]">
-          <div className="overflow-x-auto">
-            <table className="w-full">
+        
+        {/* Responsive Table/Cards */}
+        <div className="bg-[#FAF7F0] border border-[#E9E1D2] rounded-2xl overflow-hidden shadow-sm">
+          {/* Desktop View */}
+          <div className="hidden md:block overflow-x-auto">
+            <table className="w-full text-[13px]">
               <thead className="bg-[#E9E1D2]/30">
                 <tr>
                   <th className="px-6 py-3 text-left text-[10px] font-bold text-[#9A7E65] uppercase tracking-widest">Service</th>
@@ -187,7 +190,7 @@ export default async function AttendancePage(props: {
                 {completedEvents.map((event: ChurchEvent) => (
                   <tr key={event.id} className="hover:bg-[#E9E1D2]/10 transition-colors">
                     <td className="px-6 py-4 font-bold text-[#1E1208]">{event.name}</td>
-                    <td className="px-6 py-4 text-[#9A7E65]">{event.service_type}</td>
+                    <td className="px-6 py-4 text-[#9A7E65]">{event.service_type.replace('_', ' ')}</td>
                     <td className="px-6 py-4 text-[#9A7E65]">{event.event_date}</td>
                     <td className="px-6 py-4 text-center">
                       <span className="bg-white px-2.5 py-1 rounded-full border border-[#E9E1D2] font-bold">
@@ -206,6 +209,38 @@ export default async function AttendancePage(props: {
                 ))}
               </tbody>
             </table>
+          </div>
+
+          {/* Mobile View */}
+          <div className="md:hidden divide-y divide-[#E9E1D2]">
+            {completedEvents.map((event: ChurchEvent) => (
+              <div key={event.id} className="p-5 space-y-3 bg-white hover:bg-[#FAF7F0] transition-colors">
+                <div className="flex justify-between items-start">
+                  <div>
+                    <h4 className="font-bold text-[#1E1208]">{event.name}</h4>
+                    <p className="text-[10px] text-[#9A7E65] font-bold uppercase tracking-wider mt-0.5">
+                      {event.service_type.replace('_', ' ')}
+                    </p>
+                  </div>
+                  <span className="bg-[#FAF7F0] px-2.5 py-1 rounded-full border border-[#E9E1D2] text-xs font-black text-[#B5622A]">
+                    {event.attending_count}
+                  </span>
+                </div>
+                
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2 text-[#9A7E65] text-[11px] font-medium">
+                    <Calendar className="w-3 h-3" />
+                    {event.event_date}
+                  </div>
+                  <Link 
+                    href={`/${church_slug}/admin/attendance/${event.id}`}
+                    className="flex items-center gap-1 text-[#B5622A] font-black text-[10px] uppercase tracking-widest"
+                  >
+                    Details <ChevronRight className="w-3.5 h-3.5" />
+                  </Link>
+                </div>
+              </div>
+            ))}
           </div>
         </div>
       </section>

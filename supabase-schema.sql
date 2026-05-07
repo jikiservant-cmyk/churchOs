@@ -1035,14 +1035,14 @@ BEGIN
 END;
 $$;
 
-GRANT EXECUTE ON FUNCTION church.validate_usher_passkey(text, text) TO anon, authenticated, service_role;
-GRANT EXECUTE ON FUNCTION public.validate_usher_passkey(text, text) TO anon, authenticated, service_role;
-GRANT EXECUTE ON FUNCTION church.get_or_create_event(uuid, church.event_service_type, date, time, text, text, uuid) TO anon, authenticated, service_role;
-GRANT EXECUTE ON FUNCTION church.check_in_member_manual(uuid, uuid, church.attendance_status, timestamptz, text, uuid) TO anon, authenticated, service_role;
-GRANT EXECUTE ON FUNCTION church.check_in_member_manual_by_date(uuid, church.event_service_type, date, uuid, church.attendance_status, timestamptz, text) TO anon, authenticated, service_role;
-GRANT EXECUTE ON FUNCTION church.increment_event_attendance(uuid) TO anon, authenticated, service_role;
-GRANT EXECUTE ON FUNCTION church.decrement_event_attendance(uuid) TO anon, authenticated, service_role;
-GRANT EXECUTE ON FUNCTION church.remove_attendance_manual(uuid, uuid) TO anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION church.validate_usher_passkey(text, text) TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.validate_usher_passkey(text, text) TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION church.get_or_create_event(uuid, church.event_service_type, date, time, text, text, uuid) TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION church.check_in_member_manual(uuid, uuid, church.attendance_status, timestamptz, text, uuid) TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION church.check_in_member_manual_by_date(uuid, church.event_service_type, date, uuid, church.attendance_status, timestamptz, text) TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION church.increment_event_attendance(uuid) TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION church.decrement_event_attendance(uuid) TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION church.remove_attendance_manual(uuid, uuid) TO authenticated, service_role;
 
 -- Follow-up Processor for Inactivity
 CREATE OR REPLACE FUNCTION church.process_inactive_30_days_followups(p_church_id uuid DEFAULT NULL)

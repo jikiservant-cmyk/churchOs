@@ -1,17 +1,12 @@
 import { createClient } from "@/lib/supabase/server";
-import { topUpWallet } from "@/lib/wallet-actions";
 import {
   History,
-  Smartphone,
-  CheckCircle2,
-  XCircle,
-  Wallet,
   AlertCircle,
 } from "lucide-react";
 import BroadcastComposer from "@/components/BroadcastComposer";
 import { getChurchBySlug } from "@/lib/db";
-import { formatDistanceToNow } from "date-fns";
 import BroadcastHistory from "@/components/BroadcastHistory";
+import SMSWalletWidget from "@/components/SMSWalletWidget";
 
 export default async function MessagesPage(props: {
   params: Promise<{ church_slug: string }>;
@@ -221,34 +216,12 @@ export default async function MessagesPage(props: {
         </div>
 
         {/* SMS Wallet Widget */}
-        <div className="bg-[#F0E6D3] border border-[rgba(90,55,20,0.13)] rounded-2xl p-4 shadow-sm flex items-center gap-4 min-w-[280px]">
-          <div
-            className={`w-12 h-12 rounded-xl flex items-center justify-center ${remainingSMS < 20 ? "bg-red-50 text-[#B5622A]" : "bg-[rgba(90,55,20,0.05)] text-[#B5622A]"}`}
-          >
-            <Wallet className="w-6 h-6" />
-          </div>
-          <div className="flex-1">
-            <div className="flex items-center justify-between">
-              <p className="text-[10px] font-bold text-[#C8B89A] uppercase tracking-widest">
-                SMS Balance
-              </p>
-              {remainingSMS < 50 && (
-                <span className="flex items-center gap-1 text-[10px] font-bold text-[#B5622A] animate-pulse">
-                  <AlertCircle className="w-3 h-3" /> Low Balance
-                </span>
-              )}
-            </div>
-            <h3 className="text-lg font-black text-[#1E1208] leading-tight">
-              {remainingSMS}{" "}
-              <span className="text-sm font-bold text-[#C8B89A]">
-                SMS remaining
-              </span>
-            </h3>
-            <p className="text-[10px] font-medium text-[#9A7E65] mt-0.5">
-              UGX {balanceUgx.toLocaleString()} ({leftoverUGX} leftover)
-            </p>
-          </div>
-        </div>
+        <SMSWalletWidget 
+          remainingSMS={remainingSMS}
+          balanceUgx={balanceUgx}
+          leftoverUGX={leftoverUGX}
+          churchId={church.id}
+        />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">

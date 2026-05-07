@@ -1,8 +1,9 @@
 'use client';
 
 import { useState, useMemo } from 'react';
-import { Search, UserCheck, X, Check, Loader2, Users } from 'lucide-react';
+import { Search, UserCheck, X, Check, Loader2, Users, RotateCcw } from 'lucide-react';
 import { markAttendance, removeAttendance } from '@/lib/attendance-actions';
+import { toast } from 'sonner';
 
 interface Member {
   id: string;
@@ -48,7 +49,12 @@ export default function CheckInClient({
       if (result.success) {
         setAttendedIds(prev => new Set([...Array.from(prev), memberId]));
         setSearch(''); // Clear search after check-in
+        toast.success('Member checked in');
+      } else {
+        toast.error(result.error || 'Failed to check in');
       }
+    } catch (error) {
+      toast.error('An unexpected error occurred');
     } finally {
       setIsProcessing(null);
     }
@@ -64,9 +70,22 @@ export default function CheckInClient({
           next.delete(memberId);
           return next;
         });
+        toast.success('Check-in removed');
+      } else {
+        toast.error(result.error || 'Failed to remove check-in');
       }
+    } catch (error) {
+      toast.error('An unexpected error occurred');
     } finally {
       setIsProcessing(null);
+    }
+  };
+
+  const handleToggle = async (memberId: string, isCurrentlyAttended: boolean) => {
+    if (isCurrentlyAttended) {
+      await handleUndo(memberId);
+    } else {
+      await handleCheckIn(memberId);
     }
   };
 
@@ -106,17 +125,17 @@ export default function CheckInClient({
                   return (
                     <button
                       key={member.id}
-                      onClick={() => !isCheckedIn && handleCheckIn(member.id)}
-                      disabled={isCheckedIn || !!processing}
+                      onClick={() => handleToggle(member.id, isCheckedIn)}
+                      disabled={!!processing}
                       className={`w-full flex items-center justify-between p-3.5 rounded-2xl border transition-all text-left ${
                         isCheckedIn 
-                        ? 'bg-[#FAF7F0] border-[#E9E1D2] opacity-60' 
+                        ? 'bg-[#FDE9D9] border-[#B5622A] shadow-sm' 
                         : 'bg-white border-[#E9E1D2] hover:border-[#B5622A] hover:bg-[#FAF7F0]'
                       }`}
                     >
                       <div className="flex items-center gap-3">
                          <div className={`w-9 h-9 rounded-full flex items-center justify-center text-[11px] font-black uppercase ${
-                           isCheckedIn ? 'bg-[#9A7E65]/20 text-[#9A7E65]' : 'bg-[#B5622A] text-white shadow-sm'
+                           isCheckedIn ? 'bg-[#B5622A] text-white shadow-sm' : 'bg-[#B5622A] text-white shadow-sm'
                          }`}>
                            {member.full_name.charAt(0)}
                          </div>
@@ -129,7 +148,7 @@ export default function CheckInClient({
                       {processing ? (
                         <Loader2 className="w-5 h-5 text-[#B5622A] animate-spin" />
                       ) : isCheckedIn ? (
-                        <Check className="w-5 h-5 text-green-600" />
+                        <RotateCcw className="w-5 h-5 text-[#B5622A]" />
                       ) : (
                         <UserCheck className="w-5 h-5 text-[#B5622A]" />
                       )}

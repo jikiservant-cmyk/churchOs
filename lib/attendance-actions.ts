@@ -4,6 +4,9 @@ import { createClient, createAdminClient } from '@/lib/supabase/server';
 import { revalidatePath } from 'next/cache';
 import { cookies } from 'next/headers';
 import { ChurchEvent, AttendanceLog, AttendanceFlag, AttendanceFlagStatus } from './attendance-types';
+import { SignJWT, jwtVerify } from 'jose';
+
+const JWT_SECRET = new TextEncoder().encode(process.env.SUPABASE_SERVICE_ROLE_KEY);
 
 export async function validateUsherPasskey(churchSlug: string, passkey: string) {
   try {
@@ -11,7 +14,6 @@ export async function validateUsherPasskey(churchSlug: string, passkey: string) 
     const supabase = await createAdminClient();
     
     // 1. Validate church exists and passkey is correct
-    // Use the public schema proxy to avoid any schema routing issues
     const { data, error } = await supabase
       .rpc('validate_usher_passkey', {
         p_church_slug: churchSlug,
@@ -24,7 +26,6 @@ export async function validateUsherPasskey(churchSlug: string, passkey: string) 
     }
 
     const result = Array.isArray(data) ? data[0] : data;
-    console.log('Raw validation result:', result);
     
     let churchId: string | null = null;
     let churchName: string | null = null;
@@ -34,54 +35,35 @@ export async function validateUsherPasskey(churchSlug: string, passkey: string) 
       churchId = result.church_id || result.id;
       churchName = result.church_name || result.name;
       isValid = result.valid === true || !!churchId;
-    } else if (typeof result === 'string' && result.length > 0) {
-      churchId = result;
-      isValid = true;
     }
 
     if (!isValid || !churchId) {
-      console.log('Passkey validation result failed verification:', result);
       return { success: false, error: 'Invalid passkey. Please check and try again.' };
     }
 
-    // If we only have churchId, fetch name for the session if missing
-    if (!churchName) {
-      const { data: church } = await supabase
-        .schema('church')
-        .from('churches')
-        .select('name')
-        .eq('id', churchId)
-        .maybeSingle();
-      
-      churchName = church?.name || 'Your Church';
-    }
-
-    // 2. Set usher session cookie with robust settings
-    const cookieStore = await cookies();
-    const sessionData = {
+    // 2. Create a cryptographically signed JWT for the session
+    const token = await new SignJWT({
       church_id: churchId,
       church_name: churchName,
       church_slug: churchSlug,
-      role: 'usher',
-      authenticatedAt: new Date().toISOString(),
-      expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
-    };
+      role: 'usher'
+    })
+      .setProtectedHeader({ alg: 'HS256' })
+      .setIssuedAt()
+      .setExpirationTime('24h')
+      .sign(JWT_SECRET);
 
+    const cookieStore = await cookies();
     const cookieName = `usher_session_${churchSlug.toLowerCase()}`;
     
-    // Clear old session
-    cookieStore.delete(cookieName);
-
-    cookieStore.set(cookieName, JSON.stringify(sessionData), {
+    cookieStore.set(cookieName, token, {
       httpOnly: true,
       secure: true,
-      sameSite: 'none',
+      sameSite: 'lax',
       path: '/',
       maxAge: 60 * 60 * 24 // 24 hours
     });
 
-    console.log('Usher session created for:', churchName);
-    
     revalidatePath(`/${churchSlug}/usher/dashboard`);
     return { success: true, churchName };
 
@@ -89,7 +71,7 @@ export async function validateUsherPasskey(churchSlug: string, passkey: string) 
     console.error('CRITICAL: validateUsherPasskey error:', error);
     return { 
       success: false, 
-      error: error instanceof Error ? error.message : 'An unexpected security or network error occurred' 
+      error: 'An unexpected security or network error occurred' 
     };
   }
 }
@@ -97,17 +79,15 @@ export async function validateUsherPasskey(churchSlug: string, passkey: string) 
 export async function getUsherSession(churchSlug: string) {
   const cookieStore = await cookies();
   const cookieName = `usher_session_${churchSlug.toLowerCase()}`;
-  const session = cookieStore.get(cookieName);
+  const token = cookieStore.get(cookieName)?.value;
   
-  if (!session) {
-    console.log('No usher session found for:', churchSlug);
-    return null;
-  }
+  if (!token) return null;
   
   try {
-    return JSON.parse(session.value);
+    const { payload } = await jwtVerify(token, JWT_SECRET);
+    return payload as any;
   } catch (e) {
-    console.error('Session parse error:', e);
+    console.error('Usher session verification failed:', e);
     return null;
   }
 }
@@ -252,10 +232,10 @@ async function checkAuthorization(churchSlug: string, eventId: string) {
   const { data: { user } } = await client.auth.getUser();
 
   if (user) {
-    const { data: profile } = await adminClient.from('admin_profiles').select('tenant_id').eq('id', user.id).single();
+    const { data: profile } = await adminClient.from('admin_profiles').select('tenant_id').eq('id', user.id).maybeSingle();
     if (profile && profile.tenant_id === event.church_id) {
        // Make sure churchSlug matches the tenant (rough check, strictly we check the event's church_id)
-       const { data: church } = await adminClient.schema('church').from('churches').select('slug').eq('id', event.church_id).single();
+       const { data: church } = await adminClient.schema('church').from('churches').select('slug').eq('id', event.church_id).maybeSingle();
        if (church && church.slug === churchSlug) {
          return { adminClient, allowed: true };
        }
@@ -269,20 +249,46 @@ export async function markAttendance(churchSlug: string, eventId: string, member
   try {
     const { adminClient: supabase } = await checkAuthorization(churchSlug, eventId);
     
+    // 1. Get the church_id from the event first
+    const { data: eventData, error: eventError } = await supabase
+      .schema('church')
+      .from('events')
+      .select('church_id')
+      .eq('id', eventId)
+      .single();
+
+    if (eventError || !eventData) {
+      throw new Error('Could not find event details.');
+    }
+
+    // 2. Direct upsert into attendance_logs using Admin Client (bypasses RLS)
     const { error } = await supabase
       .schema('church')
-      .rpc('check_in_member_manual', {
-        p_member_id: memberId,
-        p_event_id: eventId,
-        p_attendance_status: status
-      });
+      .from('attendance_logs')
+      .upsert({
+        church_id: eventData.church_id,
+        member_id: memberId,
+        event_id: eventId,
+        attendance_status: status,
+        check_in_time: new Date().toISOString()
+        // recorded_by omitted to avoid FK constraint issues with non-user ushers
+      }, { onConflict: 'member_id,event_id' });
 
-    if (error) return { error: error.message };
+    if (error) {
+      console.error('[markAttendance] Upsert Error:', error);
+      return { error: `Database error: ${error.message}` };
+    }
 
-    await supabase.schema('church').rpc('increment_event_attendance', { event_id: eventId });
+    // 3. Update the attendance count using the RPC which is multi-tenant safe
+    // Explicitly call from the 'church' schema if that's where it is
+    await supabase.schema('church').rpc('increment_event_attendance', { p_event_id: eventId });
 
+    revalidatePath(`/${churchSlug}/usher/dashboard`);
+    revalidatePath(`/${churchSlug}/admin/attendance`);
+    revalidatePath(`/${churchSlug}/admin/attendance/${eventId}`);
     return { success: true };
   } catch (error: any) {
+    console.error('[markAttendance] Exception:', error);
     return { error: error.message || 'Failed to record check-in.' };
   }
 }
@@ -291,19 +297,43 @@ export async function removeAttendance(churchSlug: string, eventId: string, memb
   try {
     const { adminClient: supabase } = await checkAuthorization(churchSlug, eventId);
     
+    // 1. Get event data to verify tenant scope
+    const { data: eventData } = await supabase
+      .schema('church')
+      .from('events')
+      .select('church_id')
+      .eq('id', eventId)
+      .single();
+
+    if (!eventData) throw new Error('Event not found');
+
+    // 2. Direct delete from attendance_logs using Admin Client (bypasses RLS)
+    // We include church_id for extra safety in multi-tenant environment
     const { error } = await supabase
       .schema('church')
-      .rpc('remove_attendance_manual', {
-        p_member_id: memberId,
-        p_event_id: eventId
+      .from('attendance_logs')
+      .delete()
+      .match({ 
+        member_id: memberId, 
+        event_id: eventId,
+        church_id: eventData.church_id 
       });
 
-    if (error) return { error: error.message };
+    if (error) {
+      console.error('[removeAttendance] Delete Error:', error);
+      return { error: `Database error: ${error.message}` };
+    }
 
-    await supabase.schema('church').rpc('decrement_event_attendance', { event_id: eventId });
+    // 3. Update the attendance count using the RPC
+    await supabase.schema('church').rpc('decrement_event_attendance', { p_event_id: eventId });
 
+    revalidatePath(`/${churchSlug}/usher/dashboard`);
+    revalidatePath(`/${churchSlug}/admin/attendance`);
+    revalidatePath(`/${churchSlug}/admin/attendance/${eventId}`);
+    
     return { success: true };
   } catch (error: any) {
+    console.error('[removeAttendance] Exception:', error);
     return { error: error.message || 'Failed to remove check-in.' };
   }
 }
