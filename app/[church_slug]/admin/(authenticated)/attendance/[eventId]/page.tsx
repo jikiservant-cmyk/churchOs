@@ -25,40 +25,27 @@ export default async function EventAttendancePage(props: {
   const { church_slug, eventId } = resolvedParams;
   const supabase = await createClient();
 
-  // Fetch Event
-  const { data: event } = await supabase
-    .schema('church')
-    .from('events')
-    .select('*')
-    .eq('id', eventId)
-    .single();
+  // Optimized parallel fetching
+  const [eventResult, churchResult, logsResult] = await Promise.all([
+    supabase.schema('church').from('events').select('*').eq('id', eventId).single(),
+    supabase.schema('church').from('churches').select('id').eq('slug', church_slug).single(),
+    supabase.schema('church').from('attendance_logs').select('member_id, attendance_status, check_in_time').eq('event_id', eventId)
+  ]);
+
+  const { data: event } = eventResult;
+  const { data: church } = churchResult;
+  const { data: logs } = logsResult;
 
   if (!event) redirect(`/${church_slug}/admin/attendance`);
-
-  // Fetch Church
-  const { data: church } = await supabase
-    .schema('church')
-    .from('churches')
-    .select('id')
-    .eq('slug', church_slug)
-    .single();
-
   if (!church) redirect('/');
 
-  // Fetch all members for check-in
+  // Fetch members only after we have church ID
   const { data: members } = await supabase
     .schema('church')
     .from('members')
     .select('*')
-    .eq('church_id', church?.id)
+    .eq('church_id', church.id)
     .order('full_name');
-
-  // Fetch current attendance logs
-  const { data: logs } = await supabase
-    .schema('church')
-    .from('attendance_logs')
-    .select('member_id, attendance_status, check_in_time')
-    .eq('event_id', eventId);
 
   const attendedMemberIds = new Set(logs?.map(l => l.member_id) || []);
 

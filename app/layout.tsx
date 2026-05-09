@@ -2,7 +2,6 @@ import type {Metadata} from 'next';
 import { Outfit, Playfair_Display } from 'next/font/google';
 import './globals.css';
 import SWRegistration from '@/components/SWRegistration';
-
 import SplashScreen from '@/components/SplashScreen';
 
 const outfit = Outfit({

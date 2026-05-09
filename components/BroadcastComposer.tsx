@@ -1,7 +1,7 @@
 'use client';
 
-import { useState, useRef } from 'react';
-import { Send, AlertCircle, Loader2, Sparkles } from 'lucide-react';
+import { useState, useRef, useMemo } from 'react';
+import { Send, AlertCircle, Loader2, Sparkles, CheckCircle2 } from 'lucide-react';
 import { normalizeUgPhone } from '@/lib/utils';
 import { useRouter } from 'next/navigation';
 
@@ -15,21 +15,25 @@ export default function BroadcastComposer({ members, churchId }: {
   const [audience, setAudience] = useState<'all' | 'men' | 'women' | 'youth' | 'new_converts'>('all');
   const [recipientLimit, setRecipientLimit] = useState<number | ''>('');
   const [progress, setProgress] = useState({ active: false, total: 0, sent: 0, failed: 0 });
+  const [status, setStatus] = useState<{ type: 'success' | 'error' | 'info', message: string } | null>(null);
   const sendingRef = useRef(false);
   const router = useRouter();
 
-  const filteredMembers = members.filter(m => {
-    if (audience === 'all') return true;
-    if (audience === 'men') return m.source === 'member' && m.gender === 'male';
-    if (audience === 'women') return m.source === 'member' && m.gender === 'female';
-    if (audience === 'youth') return m.source === 'member' && m.is_youth === true;
-    if (audience === 'new_converts') return m.source === 'new_convert';
-    return true;
-  });
+  // Use useMemo to prevent expensive filtering on every progress update re-render
+  const finalMembers = useMemo(() => {
+    const filtered = members.filter(m => {
+      if (audience === 'all') return true;
+      if (audience === 'men') return m.source === 'member' && m.gender === 'male';
+      if (audience === 'women') return m.source === 'member' && m.gender === 'female';
+      if (audience === 'youth') return m.source === 'member' && m.is_youth === true;
+      if (audience === 'new_converts') return m.source === 'new_convert';
+      return true;
+    });
 
-  const finalMembers = recipientLimit && typeof recipientLimit === 'number' && recipientLimit > 0 
-    ? filteredMembers.slice(0, recipientLimit) 
-    : filteredMembers;
+    return recipientLimit && typeof recipientLimit === 'number' && recipientLimit > 0 
+      ? filtered.slice(0, recipientLimit) 
+      : filtered;
+  }, [members, audience, recipientLimit]);
   
   const audienceLabels = {
     all: 'All Contacts',
@@ -46,6 +50,7 @@ export default function BroadcastComposer({ members, churchId }: {
 
     setIsGenerating(true);
     setMessage('');
+    setStatus(null);
     try {
       const response = await fetch('/api/ai/generate-message', {
         method: 'POST',
@@ -62,10 +67,11 @@ export default function BroadcastComposer({ members, churchId }: {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        setMessage(prev => prev + decoder.decode(value));
+        const chunk = decoder.decode(value);
+        setMessage(prev => prev + chunk);
       }
     } catch (err: any) {
-      alert(err.message || 'Error generating message');
+      setStatus({ type: 'error', message: err.message || 'Error generating message' });
     } finally {
       setIsGenerating(false);
     }
@@ -77,6 +83,7 @@ export default function BroadcastComposer({ members, churchId }: {
     
     sendingRef.current = true;
     setIsSending(true);
+    setStatus(null);
     setProgress({ active: true, total: finalMembers.length, sent: 0, failed: 0 });
     
     try {
@@ -100,8 +107,9 @@ export default function BroadcastComposer({ members, churchId }: {
 
       const decoder = new TextDecoder();
       let buffer = '';
+      let stopReading = false;
 
-      while (true) {
+      while (!stopReading) {
         const { done, value } = await reader.read();
         if (done) break;
 
@@ -111,25 +119,33 @@ export default function BroadcastComposer({ members, churchId }: {
 
         for (const line of lines) {
           if (!line.trim()) continue;
-          const update = JSON.parse(line);
+          try {
+            const update = JSON.parse(line);
 
-          if (update.type === 'success') {
+            if (update.type === 'success') {
             setProgress(p => ({ ...p, sent: p.sent + 1 }));
           } else if (update.type === 'error') {
             setProgress(p => ({ ...p, failed: p.failed + 1 }));
+            console.error(`Broadcast error for ${update.recipient}:`, update.error);
           } else if (update.type === 'halt') {
-            alert(`Broadcast halted: ${update.reason}`);
-            break;
+              setStatus({ type: 'error', message: `Halted: ${update.reason}` });
+              stopReading = true;
+              break;
+            }
+          } catch (e) {
+            console.warn("Error parsing stream chunk", e);
           }
         }
       }
 
-      alert(`Broadcast Complete! 🚀`);
-      setMessage('');
-      router.refresh();
+      if (!stopReading) {
+        setStatus({ type: 'success', message: 'Broadcast Complete! 🚀' });
+        setMessage('');
+        router.refresh();
+      }
     } catch (err: any) {
       console.error(err);
-      alert(err.message || "Failed to complete broadcast.");
+      setStatus({ type: 'error', message: err.message || "Failed to complete broadcast." });
     } finally {
       setIsSending(false);
       setProgress(p => ({ ...p, active: false }));
@@ -144,19 +160,18 @@ export default function BroadcastComposer({ members, churchId }: {
           <Send className="w-5 h-5 text-[#B5622A]" />
           New Broadcast
         </h2>
-        <button
-          onClick={generateWithAI}
-          disabled={isGenerating || isSending}
-          className="flex items-center gap-2 px-4 py-2 bg-[#B5622A]/10 text-[#B5622A] rounded-xl text-xs font-bold hover:bg-[#B5622A]/20 transition-all disabled:opacity-50"
-        >
-          {isGenerating ? (
-            <Loader2 className="w-4 h-4 animate-spin" />
-          ) : (
-            <Sparkles className="w-4 h-4" />
-          )}
-          Generate with AI
-        </button>
       </div>
+
+      {status && (
+        <div className={`mb-6 p-4 rounded-xl flex items-center gap-3 animate-in fade-in slide-in-from-top-2 ${
+          status.type === 'success' ? 'bg-green-50 text-green-700 border border-green-200' : 
+          status.type === 'error' ? 'bg-red-50 text-red-700 border border-red-200' : 
+          'bg-blue-50 text-blue-700 border border-blue-200'
+        }`}>
+          {status.type === 'success' ? <CheckCircle2 className="w-5 h-5" /> : <AlertCircle className="w-5 h-5" />}
+          <p className="text-sm font-bold">{status.message}</p>
+        </div>
+      )}
 
       <form onSubmit={handleSend} className="space-y-6">
         <div className="bg-[rgba(181,98,42,0.05)] border border-[rgba(181,98,42,0.12)] rounded-xl p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">

@@ -25,9 +25,9 @@ export async function POST(req: Request) {
     // We check if the authenticated user explicitly belongs to this churchId via admin_profiles.
     const { data: adminProfile } = await supabaseUserClient
       .from('admin_profiles')
-      .select('church_id')
+      .select('tenant_id')
       .eq('id', user.id)
-      .eq('church_id', churchId)
+      .eq('tenant_id', churchId)
       .maybeSingle();
 
     if (!adminProfile) {
@@ -144,7 +144,7 @@ export async function POST(req: Request) {
     // 6. Create Initial "PENDING" Log
     // This provides immediate feedback in the dashboard and reserves an idempotency key.
     // The database trigger will NOT debit yet because status is 'PENDING'.
-    const idempotencyKey = `sms_${Math.random().toString(36).substring(2, 10)}_${Date.now()}`;
+    const idempotencyKey = body.idempotencyKey || `sms_${Math.random().toString(36).substring(2, 10)}_${Date.now()}`;
     const insertPayload = {
         tenant_id: churchId,
         recipient_phone: finalPhone,

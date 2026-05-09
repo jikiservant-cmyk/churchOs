@@ -89,8 +89,7 @@ export async function provisionTenant(prevState: ProvisionState, formData: FormD
         p_user_id: user.id,
         p_name: sanitizedName,
         p_slug: sanitizedSlug,
-        p_role: 'pastor',
-        p_ip_address: ip
+        p_role: 'pastor'
       });
 
     if (rpcError) {

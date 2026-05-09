@@ -99,7 +99,8 @@ export default async function AdminLayout({
           if (correctSlug) {
             // Found their home!
             if (correctSlug !== resolvedParams.church_slug) {
-              redirect(`/${correctSlug}/admin`);
+              shouldRedirect = true;
+              redirectUrl = `/${correctSlug}/admin`;
             }
           } else if (!isFallback) {
             // They belong to a specific church but are visiting another one

@@ -16,7 +16,7 @@ export default async function ChurchLayout({
   const church = await getChurchBySlug(resolvedParams.church_slug);
 
   if (!church) {
-    return notFound();
+    notFound();
   }
 
   return (

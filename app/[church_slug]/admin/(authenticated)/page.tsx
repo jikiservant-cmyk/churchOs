@@ -19,27 +19,31 @@ export default async function AdminDashboard({
 
   const supabase = await createClient();
 
-  // Fetch pastor name
-  const { data: { user } } = await supabase.auth.getUser();
+  // Optimized Parallel Data Fetching
+  const [userResult, memberCountResult, recentMembersResult, eventsResult, prayersResult, demographicsResult, convertsResult, donationsResult] = await Promise.all([
+    supabase.auth.getUser(),
+    supabase.schema('church').from('members').select('id', { count: 'exact', head: true }).eq('church_id', church.id),
+    supabase.schema('church').from('members').select('full_name, created_at').eq('church_id', church.id).order('created_at', { ascending: false }).limit(5),
+    supabase.schema('church').from('events').select('*').eq('church_id', church.id).order('event_date', { ascending: false }).limit(5),
+    supabase.schema('church').from('prayers').select('*').eq('church_id', church.id).order('created_at', { ascending: false }).limit(5),
+    supabase.schema('church').from('members').select('gender, is_youth').eq('church_id', church.id),
+    supabase.schema('church').from('new_converts').select('created_at').eq('church_id', church.id).gte('created_at', new Date(new Date().setMonth(new Date().getMonth() - 5)).toISOString()),
+    supabase.schema('church').from('donations').select('amount_cents, created_at').eq('church_id', church.id).gte('created_at', new Date(new Date().setMonth(new Date().getMonth() - 5)).toISOString())
+  ]);
+
+  const { data: { user } } = userResult;
   const pastorName = user?.user_metadata?.full_name || 
                      user?.user_metadata?.name || 
                      user?.email?.split('@')[0].split('.').map((s: string) => s.charAt(0).toUpperCase() + s.slice(1)).join(' ') || 
                      'Pastor';
 
-  // Fetch real data for stats and members
-  let { count: memberCount, error: memberCountError } = await supabase
-    .schema('church')
-    .from('members')
-    .select('id', { count: 'exact', head: true })
-    .eq('church_id', church.id);
-
-  let { data: recentMembers, error: recentMembersError } = await supabase
-    .schema('church')
-    .from('members')
-    .select('full_name, created_at')
-    .eq('church_id', church.id)
-    .order('created_at', { ascending: false })
-    .limit(5);
+  const { count: memberCount } = memberCountResult;
+  const { data: recentMembers } = recentMembersResult;
+  const { data: dbEvents } = eventsResult;
+  const { data: dbPrayers } = prayersResult;
+  const { data: membersDemographics } = demographicsResult;
+  const { data: recentConverts } = convertsResult;
+  const { data: recentDonations } = donationsResult;
 
   const realMemberCount = memberCount || 0;
   const mappedMembers = recentMembers?.map(m => ({
@@ -48,17 +52,7 @@ export default async function AdminDashboard({
     role: 'Member'
   })) || [];
 
-  // Fetch Events
-  const { data: dbEvents } = await supabase
-    .schema('church')
-    .from('events')
-    .select('*')
-    .eq('church_id', church.id)
-    .order('event_date', { ascending: false })
-    .limit(5);
   const events = dbEvents || [];
-
-  // Map events for display
   const mappedEvents = events.map(e => ({
     title: e.name,
     day: new Date(e.event_date).toLocaleDateString('en-US', { weekday: 'short' }),
@@ -66,17 +60,12 @@ export default async function AdminDashboard({
     attending_count: e.attending_count || 0
   }));
 
-  // Fetch Prayers
-  const { data: dbPrayers } = await supabase.schema('church').from('prayers').select('*').eq('church_id', church.id).order('created_at', { ascending: false }).limit(5);
   const prayers = dbPrayers?.map(p => {
     const diffHours = Math.floor((new Date().getTime() - new Date(p.created_at).getTime()) / (1000 * 60 * 60));
     const ago = diffHours < 24 ? `${diffHours}h ago` : diffHours < 48 ? 'Yesterday' : `${Math.floor(diffHours/24)}d ago`;
     return { name: p.submitter_name, text: p.body, ago, status: p.status };
   }) || [];
 
-  // Fetch Demographics
-  let { data: membersDemographics, error: demoErr } = await supabase.schema('church').from('members').select('gender, is_youth').eq('church_id', church.id);
-  
   let maleCount = 0;
   let femaleCount = 0;
   let youthCount = 0;
@@ -98,9 +87,6 @@ export default async function AdminDashboard({
     { name: 'Youth', value: youthCount, color: '#B5622A' },
     { name: 'Adults', value: adultCount, color: '#2B1A0E' }
   ];
-
-  // Fetch New Converts
-  let { data: recentConverts, error: convertsErr } = await supabase.schema('church').from('new_converts').select('created_at').eq('church_id', church.id).gte('created_at', new Date(new Date().setMonth(new Date().getMonth() - 5)).toISOString());
 
   // Aggregate converts by month (last 6 months)
   const convertsByMonth: Record<string, number> = {};
@@ -126,14 +112,6 @@ export default async function AdminDashboard({
     });
   }
   const convertsData = Object.keys(convertsByMonth).map(month => ({ month, count: convertsByMonth[month] }));
-
-  // Fetch Donations
-  let { data: recentDonations } = await supabase
-    .schema('church')
-    .from('donations')
-    .select('amount_cents, created_at')
-    .eq('church_id', church.id)
-    .gte('created_at', new Date(new Date().setMonth(new Date().getMonth() - 5)).toISOString());
 
   if (recentDonations) {
     recentDonations.forEach(d => {
@@ -260,12 +238,18 @@ export default async function AdminDashboard({
               <div key={index} className="px-6 py-4 flex flex-start gap-3 hover:bg-[rgba(90,55,20,0.02)] transition-colors">
                  <div className="mt-2 w-1.5 h-1.5 rounded-full bg-[rgba(90,55,20,0.2)] shrink-0" />
                  <div className="flex-1 min-w-0">
-                    <p className="text-[11px] font-bold text-[#9A7E65] mb-0.5">
-                      {p.name} <span className="text-[#C8B89A] font-medium ml-1.5">· {p.ago}</span>
-                    </p>
-                    <p className="text-[13px] text-[#1E1208] leading-relaxed font-medium">{p.text}</p>
+                   <div className="flex items-center justify-between">
+                     <p className="text-[13px] font-bold text-[#1E1208]">{p.name}</p>
+                     <span className="text-[10px] text-[#9A7E65] font-medium">{p.ago}</span>
+                   </div>
+                   <p className="text-[13px] text-[#9A7E65] mt-1 line-clamp-2 leading-relaxed italic">&quot;{p.text}&quot;</p>
+                   <div className="flex items-center gap-4 mt-2">
+                      <button className="text-[10px] font-bold text-[#B5622A] uppercase tracking-wider hover:opacity-70 transition-opacity flex items-center gap-1">
+                        Praying
+                      </button>
+                      <button className="text-[10px] font-bold text-[#9A7E65] uppercase tracking-wider hover:opacity-70 transition-opacity">Archive</button>
+                   </div>
                  </div>
-                 <button className="self-center px-3 py-1 border border-[rgba(90,55,20,0.2)] text-[10px] font-bold text-[#9A7E65] rounded-lg hover:border-[#B5622A] hover:text-[#B5622A] hover:bg-[rgba(181,98,42,0.07)] transition-all shrink-0">Answered?</button>
               </div>
             ))}
           </div>

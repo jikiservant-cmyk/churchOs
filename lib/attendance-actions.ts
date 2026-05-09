@@ -28,7 +28,7 @@ export async function validateUsherPasskey(churchSlug: string, passkey: string) 
 
     console.log('[validateUsherPasskey] Found church:', church.name, 'Expected Passkey:', church.passkey);
 
-    if (church.passkey !== passkey) {
+    if (church.passkey?.toUpperCase() !== passkey.toUpperCase()) {
       return { success: false, error: 'Invalid passkey. Please check and try again.' };
     }
 
@@ -204,6 +204,73 @@ export async function claimAdminAccess(churchId: string, churchSlug: string) {
     return { success: true };
   } catch (error) {
     return { error: 'Failed to claim access.' };
+  }
+}
+
+export async function updateChurchPasskey(churchId: string, newPasskey: string, churchSlug: string) {
+  try {
+    const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+    
+    if (!user) return { error: 'Not authenticated' };
+
+    // Verify Admin Access
+    const { data: profile } = await supabase
+      .from('admin_profiles')
+      .select('tenant_id')
+      .eq('id', user.id)
+      .eq('tenant_id', churchId)
+      .maybeSingle();
+
+    if (!profile) return { error: 'Access denied' };
+
+    const adminSupabase = await createAdminClient();
+    const { error } = await adminSupabase
+      .schema('church')
+      .from('churches')
+      .update({ passkey: newPasskey })
+      .eq('id', churchId);
+
+    if (error) {
+      console.error('[updateChurchPasskey] Error:', error);
+      return { error: error.message };
+    }
+
+    revalidatePath(`/${churchSlug}/admin/attendance`);
+    return { success: true };
+  } catch (error) {
+    console.error('[updateChurchPasskey] Unexpected error:', error);
+    return { error: 'Failed to update passkey.' };
+  }
+}
+
+export async function getEventAttendanceData(churchSlug: string, eventId: string) {
+  try {
+    const supabase = await createClient();
+    const { data: event } = await supabase.schema('church').from('events').select('*').eq('id', eventId).single();
+    
+    // Optimized parallel data fetching
+    const [churchResult, logsResult, membersResult] = await Promise.all([
+      supabase.schema('church').from('churches').select('id, passkey, name').eq('slug', churchSlug).single(),
+      supabase.schema('church').from('attendance_logs').select('member_id').eq('event_id', eventId),
+      supabase.schema('church').from('members').select('id, full_name, phone_number').eq('church_id', (await supabase.schema('church').from('churches').select('id').eq('slug', churchSlug).single()).data?.id).order('full_name')
+    ]);
+
+    const { data: church } = churchResult;
+    const { data: logs } = logsResult;
+    const { data: members } = membersResult;
+
+    if (!church) return { error: 'Church not found.' };
+
+    return { 
+      church, 
+      event, 
+      members: members || [], 
+      attendedMemberIds: logs?.map(l => l.member_id) || [] 
+    };
+  } catch (error) {
+    console.error('[getEventAttendanceData] Error:', error);
+    return { error: 'Failed to verify access.' };
   }
 }
 

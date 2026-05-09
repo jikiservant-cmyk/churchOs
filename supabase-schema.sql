@@ -154,8 +154,7 @@ CREATE OR REPLACE FUNCTION public.provision_church_v2(
   p_user_id uuid,
   p_name text,
   p_slug text,
-  p_role text,
-  p_ip_address text DEFAULT NULL
+  p_role text
 )
 RETURNS uuid
 LANGUAGE plpgsql
@@ -178,15 +177,6 @@ BEGIN
     WHERE lower(slug) = lower(p_slug)
   ) THEN
     RAISE EXCEPTION 'Workspace URL (slug) is already taken';
-  END IF;
-
-  -- 2b. IP Check: Only one church per IP to reduce scams
-  IF p_ip_address IS NOT NULL AND EXISTS (
-    SELECT 1
-    FROM church.churches
-    WHERE ip_address = p_ip_address
-  ) THEN
-    RAISE EXCEPTION 'Only one church registration is allowed per network/location.';
   END IF;
 
   -- 3. Identity Resolution (email)
@@ -212,27 +202,25 @@ BEGIN
 
   -- b) Create Church Link
   -- church.churches uses: id, name, slug, app_type, ...
-  INSERT INTO church.churches (id, name, slug, app_type, ip_address)
-  VALUES (v_tenant_id, p_name, p_slug, 'church', p_ip_address);
+  INSERT INTO church.churches (id, name, slug, app_type)
+  VALUES (v_tenant_id, p_name, p_slug, 'church');
 
   -- c) Create Admin Profile (Owner)
-  -- admin_profiles uses: id (FK to auth.users), tenant_id, role, app_type, email, full_name, ip_address
-  INSERT INTO public.admin_profiles (id, tenant_id, email, app_type, role, full_name, ip_address)
-  VALUES (p_user_id, v_tenant_id, v_user_email, 'church', p_role::admin_role_enum, p_name, p_ip_address)
+  -- admin_profiles uses: id (FK to auth.users), tenant_id, role, app_type, email, full_name
+  INSERT INTO public.admin_profiles (id, tenant_id, email, app_type, role, full_name)
+  VALUES (p_user_id, v_tenant_id, v_user_email, 'church', p_role::admin_role_enum, p_name)
   ON CONFLICT (id) DO UPDATE SET
     tenant_id = EXCLUDED.tenant_id,
     app_type = EXCLUDED.app_type,
     role = EXCLUDED.role,
-    email = EXCLUDED.email,
-    full_name = EXCLUDED.full_name,
-    ip_address = EXCLUDED.ip_address;
+    email = EXCLUDED.email;
 
   RETURN v_tenant_id;
 END;
 $$;
 
 -- Explicit Permission Grants
-GRANT EXECUTE ON FUNCTION public.provision_church_v2(uuid, text, text, text, text)
+GRANT EXECUTE ON FUNCTION public.provision_church_v2(uuid, text, text, text)
 TO anon, authenticated, service_role;
 
 GRANT USAGE ON SCHEMA public TO authenticated, service_role;
@@ -563,6 +551,10 @@ CREATE TABLE IF NOT EXISTS church.members (
   updated_at timestamptz DEFAULT now()
 );
 
+-- Optimization: Index for faster multi-tenant member lookups
+CREATE INDEX IF NOT EXISTS idx_members_church_id ON church.members(church_id);
+CREATE INDEX IF NOT EXISTS idx_members_phone_number ON church.members(phone_number);
+
 CREATE TABLE IF NOT EXISTS church.new_converts (
   id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
   church_id uuid REFERENCES church.churches(id) NOT NULL,
@@ -572,6 +564,13 @@ CREATE TABLE IF NOT EXISTS church.new_converts (
   notes text,
   created_at timestamptz DEFAULT now()
 );
+
+-- Optimization: Index for faster multi-tenant convert lookups
+CREATE INDEX IF NOT EXISTS idx_new_converts_church_id ON church.new_converts(church_id);
+
+-- Optimization: Index for attendance logs
+CREATE INDEX IF NOT EXISTS idx_attendance_logs_event_member ON church.attendance_logs(event_id, member_id);
+CREATE INDEX IF NOT EXISTS idx_attendance_logs_church_id ON church.attendance_logs(church_id);
 
 -- Enable RLS for new tables
 ALTER TABLE church.members ENABLE ROW LEVEL SECURITY;

@@ -57,9 +57,9 @@ export default function UsherEntryPage({ params }: { params: Promise<{ church_sl
                 type="text"
                 maxLength={6}
                 value={passkey}
-                onChange={(e) => setPasskey(e.target.value.replace(/\D/g, ''))}
-                placeholder="0000"
-                className="w-full pl-12 pr-4 py-4 bg-[#FAF7F0] border-2 border-transparent rounded-2xl text-2xl font-black text-center tracking-[0.5em] focus:border-[#B5622A] focus:bg-white outline-none transition-all placeholder:text-[#E9E1D2] placeholder:tracking-normal"
+                onChange={(e) => setPasskey(e.target.value.replace(/[^a-zA-Z0-9]/g, '').toUpperCase())}
+                placeholder="XXXXXX"
+                className="w-full pl-12 pr-4 py-4 bg-[#FAF7F0] border-2 border-transparent rounded-2xl text-2xl font-black text-center tracking-[0.5em] focus:border-[#B5622A] focus:bg-white outline-none transition-all placeholder:text-[#E9E1D2] placeholder:tracking-normal uppercase"
                 autoFocus
               />
             </div>

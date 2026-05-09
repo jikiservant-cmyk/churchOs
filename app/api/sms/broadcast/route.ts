@@ -25,18 +25,22 @@ export async function POST(req: Request) {
           const recipient = recipients[i];
           
           try {
-            // Call the existing send API or implement logic here
-            // For efficiency, we'll use a direct fetch to the internal send route
-            // to leverage its balance checks and logging.
-            const response = await fetch(`${process.env.APP_URL || 'http://localhost:3000'}/api/sms/send`, {
+            // Get the origin for internal fetch to avoid hardcoded localhost/3000
+            const { origin } = new URL(req.url);
+            
+            const response = await fetch(`${origin}/api/sms/send`, {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
+              headers: { 
+                'Content-Type': 'application/json',
+                'Cookie': req.headers.get('cookie') || '' // Forward session cookies
+              },
               body: JSON.stringify({
                 phoneNumber: recipient.phone_number,
                 message: message
                   .replace(/{name}/gi, recipient.full_name || 'Member')
                   .replace(/{first_name}/gi, (recipient.full_name || 'Member').split(' ')[0]),
-                churchId: churchId
+                churchId: churchId,
+                idempotencyKey: `broadcast_${churchId.slice(0, 8)}_${recipient.id}_${Date.now()}`
               })
             });
 

@@ -2,6 +2,7 @@ import { createClient } from '@/lib/supabase/server';
 import LoginForm from '@/components/LoginForm';
 import { getChurchBySlug } from '@/lib/db';
 import { redirect } from 'next/navigation';
+import { Suspense } from 'react';
 
 export default async function RootLoginPage({
   searchParams,
@@ -88,10 +89,12 @@ export default async function RootLoginPage({
   };
 
   return (
-    <LoginForm 
-      church={displayChurch} 
-      churchSlug={finalSlug} 
-      error={loginError} 
-    />
+    <Suspense fallback={<div className="min-h-screen bg-[#F5E6CE] animate-pulse" />}>
+      <LoginForm 
+        church={displayChurch} 
+        churchSlug={finalSlug} 
+        error={loginError} 
+      />
+    </Suspense>
   );
 }

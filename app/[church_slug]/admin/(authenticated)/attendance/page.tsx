@@ -10,6 +10,7 @@ import { InactivityRefreshButton } from '@/components/attendance/InactivityRefre
 import { AttendanceAlerts } from '@/components/attendance/AttendanceAlerts';
 import { CopyPortalLink } from '@/components/attendance/CopyPortalLink';
 import { GlobalSendMissedMessagesButton } from '@/components/attendance/GlobalSendMissedMessagesButton';
+import { PasskeyManager } from '@/components/attendance/PasskeyManager';
 
 export const metadata: Metadata = {
   title: 'Attendance | pastorOs',
@@ -87,6 +88,12 @@ export default async function AttendancePage(props: {
       <div className="flex items-center justify-end gap-3 pt-2">
         <CopyPortalLink churchSlug={church_slug} passkey={church.passkey || '1234'} />
       </div>
+
+      <PasskeyManager 
+        churchId={church.id} 
+        initialPasskey={church.passkey || '1234'} 
+        churchSlug={church_slug} 
+      />
 
       {/* Action Bar */}
       <CreateEventForm churchId={church.id} churchSlug={church_slug} />
