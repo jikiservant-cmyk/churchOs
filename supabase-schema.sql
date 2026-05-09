@@ -233,7 +233,7 @@ $$;
 
 -- Explicit Permission Grants
 GRANT EXECUTE ON FUNCTION public.provision_church_v2(uuid, text, text, text, text)
-TO authenticated, service_role;
+TO anon, authenticated, service_role;
 
 GRANT USAGE ON SCHEMA public TO authenticated, service_role;
 GRANT USAGE ON SCHEMA church TO authenticated, service_role;
