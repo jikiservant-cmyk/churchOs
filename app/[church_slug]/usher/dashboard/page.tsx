@@ -49,7 +49,8 @@ export default async function UsherDashboard({ params }: { params: Promise<{ chu
       .schema('church')
       .from('attendance_logs')
       .select('member_id, attendance_status')
-      .eq('event_id', activeEvent.id);
+      .eq('event_id', activeEvent.id)
+      .in('attendance_status', ['present', 'late']);
     attendanceLogs = logs || [];
   }
 

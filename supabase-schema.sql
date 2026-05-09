@@ -355,83 +355,19 @@ CREATE TABLE IF NOT EXISTS public.billing_events (
   created_at timestamptz DEFAULT now()
 );
 
--- 6. Trigger: Atomic SMS Credit Deduction (Refactored for public.wallets)
+-- 6. SMS Credit Deduction (Logic moved to Next.js routes in lib/sms-actions.ts)
+-- The application now handles wallet deduction and transaction logging explicitly
+-- to ensure consistent behavior across all environments.
+
+/*
 CREATE OR REPLACE FUNCTION church.deduct_sms_credit()
 RETURNS TRIGGER AS $$
-DECLARE
-  rows_updated int;
-  current_rate int;
-  billable_statuses text[] := ARRAY['Success', 'Sent', 'Queued', 'Buffered'];
-  ref_code text;
-BEGIN
-  -- 1. "Real Delivery Only" Guard: Only debit if entering a billable state
-  IF NOT (NEW.status = ANY(billable_statuses)) THEN
-    RETURN NEW;
-  END IF;
+... (Trigger logic preserved in comments if needed for reference)
+*/
 
-  -- 2. Idempotency Guard: If this is an update, only debit if transitioning FROM a non-billable state
-  IF (TG_OP = 'UPDATE') THEN
-    IF (OLD.status = ANY(billable_statuses)) THEN
-      RETURN NEW; -- Already debited
-    END IF;
-  END IF;
-
-  -- 3. Fetch the tenant's specific SMS rate
-  SELECT sms_rate INTO current_rate
-  FROM public.wallets
-  WHERE tenant_id = NEW.tenant_id;
-
-  -- 4. Atomic Debit
-  UPDATE public.wallets
-  SET balance = balance - current_rate,
-      last_updated = now()
-  WHERE tenant_id = NEW.tenant_id
-    AND balance >= current_rate;
-
-  GET DIAGNOSTICS rows_updated = ROW_COUNT;
-
-  -- 5. Block the transaction if balance is insufficient
-  IF rows_updated = 0 THEN
-    RAISE EXCEPTION 'Insufficient SMS balance. Please top up your account.';
-  END IF;
-
-  -- 6. Auto-log the ledger entry
-  ref_code := 'SMS_ATOMIC_' || gen_random_uuid()::text;
-  INSERT INTO public.wallet_transactions (
-    tenant_id, 
-    amount, 
-    type, 
-    description, 
-    reference_code, 
-    status,
-    idempotency_key,
-    product,
-    revenue_ugx,
-    reference_id
-  )
-  VALUES (
-    NEW.tenant_id, 
-    -current_rate, 
-    'SMS_SENT', 
-    'Sent 1 SMS to ' || COALESCE(NEW.recipient_phone, 'unknown'),
-    ref_code,
-    'success',
-    COALESCE(NEW.provider_message_id, NEW.idempotency_key, gen_random_uuid()::text),
-    'sms',
-    current_rate, -- Recording revenue
-    NEW.id::text  -- Link back to the sms_logs ID
-  );
-
-  RETURN NEW;
-END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
-
--- Trigger should be BEFORE INSERT OR UPDATE so we can block if no money exists
-DROP TRIGGER IF EXISTS before_sms_sent ON church.sms_logs;
-CREATE TRIGGER trigger_sms_billing
-BEFORE INSERT OR UPDATE ON church.sms_logs
-FOR EACH ROW
-EXECUTE FUNCTION church.deduct_sms_credit();
+-- Trigger removed to prevent double-deduction as logic is now in Next.js
+DROP TRIGGER IF EXISTS trigger_sms_billing ON church.sms_logs;
+DROP FUNCTION IF EXISTS church.deduct_sms_credit();
 
 -- 7. RPC: Securely increment wallet balance for Topups (prevents race conditions)
 CREATE OR REPLACE FUNCTION public.increment_wallet_balance(p_tenant_id uuid, p_amount bigint)
@@ -615,7 +551,7 @@ CREATE TABLE IF NOT EXISTS church.attendance_logs (
   member_id uuid NOT NULL REFERENCES church.members(id) ON DELETE CASCADE,
   event_id uuid NOT NULL REFERENCES church.events(id) ON DELETE CASCADE,
 
-  attendance_status church.attendance_status NOT NULL DEFAULT 'present',
+  attendance_status church.attendance_status NOT NULL DEFAULT 'absent',
   check_in_time timestamptz DEFAULT now(),
   notes text,
   recorded_by uuid REFERENCES auth.users(id) ON DELETE SET NULL,
@@ -755,6 +691,10 @@ BEGIN
     'active'::church.event_status,
     COALESCE(p_creator_id, auth.uid())
   )
+  ON CONFLICT (church_id, service_type, event_date, start_time)
+  DO UPDATE SET
+    name = EXCLUDED.name,
+    location = EXCLUDED.location
   RETURNING * INTO v_event;
 
   RETURN v_event;

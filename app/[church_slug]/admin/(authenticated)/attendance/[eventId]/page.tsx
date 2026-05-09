@@ -1,5 +1,5 @@
 import { createClient } from '@/lib/supabase/server';
-import { redirect } from 'next/navigation';
+import { redirect, notFound } from 'next/navigation';
 import { 
   ArrowLeft, 
   Search, 
@@ -17,6 +17,7 @@ import { updateEventStatus } from '@/lib/attendance-actions';
 import { ChurchEvent } from '@/lib/attendance-types';
 import CheckInClient from './CheckInClient';
 import { SendMissedMessagesButton } from './SendMissedMessagesButton';
+import { EventControl } from './EventControl';
 
 export default async function EventAttendancePage(props: {
   params: Promise<{ church_slug: string; eventId: string }>;
@@ -36,8 +37,8 @@ export default async function EventAttendancePage(props: {
   const { data: church } = churchResult;
   const { data: logs } = logsResult;
 
-  if (!event) redirect(`/${church_slug}/admin/attendance`);
-  if (!church) redirect('/');
+  if (!event) notFound();
+  if (!church) notFound();
 
   // Fetch members only after we have church ID
   const { data: members } = await supabase
@@ -47,7 +48,8 @@ export default async function EventAttendancePage(props: {
     .eq('church_id', church.id)
     .order('full_name');
 
-  const attendedMemberIds = new Set(logs?.map(l => l.member_id) || []);
+  const attendedLogs = logs?.filter(l => l.attendance_status === 'present' || l.attendance_status === 'late') || [];
+  const attendedMemberIdsArray = attendedLogs.map(l => l.member_id);
 
   return (
     <div className="max-w-5xl mx-auto pb-12">
@@ -97,30 +99,7 @@ export default async function EventAttendancePage(props: {
           </div>
 
           <div className="flex items-start">
-            <form action={async () => {
-              'use server';
-              const nextStatus = event.status === 'upcoming' ? 'active' : 'completed';
-              await updateEventStatus(eventId, nextStatus, church_slug);
-            }}>
-              {event.status === 'upcoming' && (
-                <button type="submit" className="flex items-center gap-2 bg-[#B5622A] text-white px-6 py-3 rounded-2xl font-bold text-[13px] uppercase tracking-widest hover:bg-[#944F22] transition-all shadow-md">
-                   <Play className="w-4 h-4 fill-current" />
-                   Start Check-in
-                </button>
-              )}
-              {event.status === 'active' && (
-                <button type="submit" className="flex items-center gap-2 bg-[#1E1208] text-white px-6 py-3 rounded-2xl font-bold text-[13px] uppercase tracking-widest hover:bg-black transition-all shadow-md">
-                   <Archive className="w-4 h-4" />
-                   Close & Finalize
-                </button>
-              )}
-              {event.status === 'completed' && (
-                <div className="flex items-center gap-2 bg-[#FAF7F0] text-[#9A7E65] px-6 py-3 rounded-2xl font-bold text-[13px] uppercase tracking-widest border border-[#E9E1D2]">
-                   <CheckCircle2 className="w-4 h-4 text-green-600" />
-                   Completed
-                </div>
-              )}
-            </form>
+            <EventControl eventId={eventId} status={event.status} churchSlug={church_slug} />
           </div>
         </div>
       </div>
@@ -131,7 +110,7 @@ export default async function EventAttendancePage(props: {
           churchSlug={church_slug}
           eventId={eventId} 
           members={members || []} 
-          attendedMemberIds={attendedMemberIds}
+          initialAttendedIds={attendedMemberIdsArray}
           eventStatus={event.status}
         />
       ) : event.status === 'completed' ? (
@@ -148,27 +127,35 @@ export default async function EventAttendancePage(props: {
            
            <div className="mt-8 border-t border-[#E9E1D2] pt-8 overflow-hidden">
              <h4 className="text-[10px] font-bold text-[#9A7E65] uppercase tracking-widest mb-6">Final Attendance List</h4>
-             <div className="grid grid-cols-1 gap-2">
-                {logs?.map(log => {
-                  const member = members?.find(m => m.id === log.member_id);
-                  return (
-                    <div key={log.member_id} className="flex items-center justify-between p-3 bg-[#FAF7F0] rounded-xl border border-[#E9E1D2]">
-                       <div className="flex items-center gap-4">
-                         <div className="w-10 h-10 bg-[#B5622A] text-white rounded-full flex items-center justify-center text-[11px] font-black uppercase shadow-sm">
-                           {member?.full_name?.charAt(0)}
+             
+             {attendedLogs.length === 0 ? (
+                <div className="py-12 text-center bg-[#FAF7F0] rounded-2xl border border-dashed border-[#E9E1D2]">
+                  <Users className="w-8 h-8 text-[#9A7E65] mx-auto mb-3 opacity-30" />
+                  <p className="text-[13px] text-[#9A7E65] font-medium">No members were marked as present for this service.</p>
+                </div>
+             ) : (
+                <div className="grid grid-cols-1 gap-2">
+                  {attendedLogs.map(log => {
+                    const member = members?.find(m => m.id === log.member_id);
+                    return (
+                      <div key={log.member_id} className="flex items-center justify-between p-3 bg-[#FAF7F0] rounded-xl border border-[#E9E1D2]">
+                         <div className="flex items-center gap-4">
+                           <div className="w-10 h-10 bg-[#B5622A] text-white rounded-full flex items-center justify-center text-[11px] font-black uppercase shadow-sm">
+                             {member?.full_name?.charAt(0)}
+                           </div>
+                           <div className="text-left">
+                             <p className="text-[14px] font-bold text-[#1E1208]">{member?.full_name}</p>
+                             <p className="text-[10px] text-[#9A7E65] font-medium">Recorded at {new Date(log.check_in_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</p>
+                           </div>
                          </div>
-                         <div className="text-left">
-                           <p className="text-[14px] font-bold text-[#1E1208]">{member?.full_name}</p>
-                           <p className="text-[10px] text-[#9A7E65] font-medium">Recorded at {new Date(log.check_in_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</p>
+                         <div className="flex items-center gap-2 px-3 py-1 bg-green-50 text-green-700 text-[10px] font-bold uppercase tracking-widest rounded-lg border border-green-100">
+                           Present
                          </div>
-                       </div>
-                       <div className="flex items-center gap-2 px-3 py-1 bg-green-50 text-green-700 text-[10px] font-bold uppercase tracking-widest rounded-lg border border-green-100">
-                         Present
-                       </div>
-                    </div>
-                  );
-                })}
-             </div>
+                      </div>
+                    );
+                  })}
+                </div>
+             )}
            </div>
         </div>
       ) : (

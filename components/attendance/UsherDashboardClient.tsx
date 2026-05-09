@@ -26,7 +26,7 @@ export function UsherDashboardClient({ churchSlug, event, members, initialLogs }
   const [processingId, setProcessingId] = useState<string | null>(null);
 
   const stats = useMemo(() => {
-    const presentCount = logs.filter(l => l.attendance_status === 'present').length;
+    const presentCount = logs.filter(l => l.attendance_status === 'present' || l.attendance_status === 'late').length;
     return {
       total: members.length,
       present: presentCount
@@ -102,7 +102,7 @@ export function UsherDashboardClient({ churchSlug, event, members, initialLogs }
       {/* Member List */}
       <div className="space-y-3">
         {filteredMembers.map((member) => {
-          const isPresent = logs.some(l => l.member_id === member.id);
+          const isPresent = logs.some(l => l.member_id === member.id && (l.attendance_status === 'present' || l.attendance_status === 'late'));
           const isProcessing = processingId === member.id;
 
           return (

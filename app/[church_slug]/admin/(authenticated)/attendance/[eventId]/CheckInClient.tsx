@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { Search, UserCheck, X, Check, Loader2, Users, RotateCcw } from 'lucide-react';
 import { markAttendance, removeAttendance } from '@/lib/attendance-actions';
 import { toast } from 'sonner';
@@ -15,25 +15,30 @@ export default function CheckInClient({
   churchSlug,
   eventId,
   members,
-  attendedMemberIds: initialAttendedIds,
+  initialAttendedIds,
   eventStatus
 }: {
   churchSlug: string;
   eventId: string;
   members: Member[];
-  attendedMemberIds: Set<string>;
+  initialAttendedIds: string[];
   eventStatus: string;
 }) {
   const [search, setSearch] = useState('');
   const [attendedIds, setAttendedIds] = useState<Set<string>>(new Set(initialAttendedIds));
   const [isProcessing, setIsProcessing] = useState<string | null>(null);
 
+  // Sync with server props when they change
+  useEffect(() => {
+    setAttendedIds(new Set(initialAttendedIds));
+  }, [initialAttendedIds]);
+
   const filteredMembers = useMemo(() => {
     if (!search) return [];
     return members.filter(m => 
       m.full_name.toLowerCase().includes(search.toLowerCase()) ||
-      m.phone_number?.includes(search)
-    ).slice(0, 5); // Just top 5
+      (m.phone_number || '').includes(search)
+    ).slice(0, 10); // Top 10 for better usability
   }, [search, members]);
 
   // All attended members (to show list)
@@ -134,13 +139,13 @@ export default function CheckInClient({
                       }`}
                     >
                       <div className="flex items-center gap-3">
-                         <div className={`w-9 h-9 rounded-full flex items-center justify-center text-[11px] font-black uppercase ${
-                           isCheckedIn ? 'bg-[#B5622A] text-white shadow-sm' : 'bg-[#B5622A] text-white shadow-sm'
+                         <div className={`w-9 h-9 rounded-full flex items-center justify-center text-[11px] font-black uppercase shadow-sm transition-colors ${
+                           isCheckedIn ? 'bg-[#B5622A] text-white' : 'bg-[#FAF7F0] text-[#9A7E65] border border-[#E9E1D2]'
                          }`}>
                            {member.full_name.charAt(0)}
                          </div>
                          <div>
-                            <p className="text-[13px] font-bold text-[#1E1208]">{member.full_name}</p>
+                            <p className={`text-[13px] font-bold transition-colors ${isCheckedIn ? 'text-[#1E1208]' : 'text-[#1E1208]'}`}>{member.full_name}</p>
                             <p className="text-[11px] text-[#9A7E65]">{member.phone_number || 'No Phone'}</p>
                          </div>
                       </div>
@@ -148,9 +153,12 @@ export default function CheckInClient({
                       {processing ? (
                         <Loader2 className="w-5 h-5 text-[#B5622A] animate-spin" />
                       ) : isCheckedIn ? (
-                        <RotateCcw className="w-5 h-5 text-[#B5622A]" />
+                        <div className="flex items-center gap-2">
+                           <span className="text-[10px] font-black uppercase text-[#B5622A] tracking-widest">Present</span>
+                           <RotateCcw className="w-5 h-5 text-[#B5622A]" />
+                        </div>
                       ) : (
-                        <UserCheck className="w-5 h-5 text-[#B5622A]" />
+                        <UserCheck className="w-5 h-5 text-[#9A7E65] group-hover:text-[#B5622A]" />
                       )}
                     </button>
                   );

@@ -34,9 +34,25 @@ export async function middleware(request: NextRequest) {
 
   // Refresh session if expired
   try {
-    await supabase.auth.getUser();
+    const { data: { user } } = await supabase.auth.getUser();
+
+    // Protective Routing for Admin
+    const url = new URL(request.url);
+    const pathParts = url.pathname.split('/');
+    
+    // Check if we are in an admin route: /[slug]/admin/...
+    if (pathParts.length >= 3 && pathParts[2] === 'admin' && pathParts[3] !== 'login') {
+      if (!user) {
+        return NextResponse.redirect(new URL(`/?error=Session Expired`, request.url));
+      }
+      
+      // We can't easily check the DB in middleware without a performance hit, 
+      // but we can at least ensure the user exists.
+      // The Layout will still do the fine-grained role/church check, 
+      // but the middleware will catch the most common "unauthenticated" case.
+    }
   } catch (e) {
-    console.error("Middleware Auth Refresh Error:", e);
+    console.error("Middleware Auth Error:", e);
   }
 
   return supabaseResponse;

@@ -1,6 +1,6 @@
 import { Metadata } from 'next';
 import { createClient, createAdminClient } from '@/lib/supabase/server';
-import { redirect } from 'next/navigation';
+import { redirect, notFound } from 'next/navigation';
 import { revalidatePath } from 'next/cache';
 import { Plus, Calendar, Clock, MapPin, CheckCircle2, ChevronRight, Activity, AlertCircle } from 'lucide-react';
 import Link from 'next/link';
@@ -35,7 +35,7 @@ export default async function AttendancePage(props: {
     .eq('slug', church_slug)
     .single();
 
-  if (!church) redirect('/');
+  if (!church) notFound();
 
   // Verify Admin Access explicitly just in case
   const { data: adminProfile } = await supabase

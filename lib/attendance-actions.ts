@@ -5,6 +5,7 @@ import { revalidatePath } from 'next/cache';
 import { cookies } from 'next/headers';
 import { ChurchEvent, AttendanceLog, AttendanceFlag, AttendanceFlagStatus } from './attendance-types';
 import { SignJWT, jwtVerify } from 'jose';
+import { sendSingleSMS } from './sms-actions';
 
 const JWT_SECRET = new TextEncoder().encode(process.env.SUPABASE_SERVICE_ROLE_KEY);
 
@@ -113,7 +114,7 @@ export async function createEvent(formData: FormData, churchId: string, churchSl
   const { error } = await supabase
     .schema('church')
     .from('events')
-    .insert({
+    .upsert({
       church_id: churchId,
       name,
       service_type: serviceType,
@@ -122,6 +123,8 @@ export async function createEvent(formData: FormData, churchId: string, churchSl
       location,
       status: 'upcoming',
       created_by: user.id
+    }, { 
+      onConflict: 'church_id,service_type,event_date,start_time' 
     });
 
   if (error) {
@@ -153,13 +156,21 @@ export async function updateEventStatus(eventId: string, status: 'upcoming' | 'a
           
           if (absentMembers.length > 0) {
             const absentLogs = absentMembers.map(m => ({
+              church_id: event.church_id,
               event_id: eventId,
               member_id: m.id,
               attendance_status: 'absent'
             }));
             
-            // Insert in chunks or just all at once
-            await adminClient.schema('church').from('attendance_logs').insert(absentLogs);
+            // Use upsert to be safe and avoid unique constraint conflicts
+            const { error: insertError } = await adminClient
+              .schema('church')
+              .from('attendance_logs')
+              .upsert(absentLogs, { onConflict: 'member_id,event_id' });
+
+            if (insertError) {
+              console.error('[updateEventStatus] Failed to auto-mark absentees:', insertError);
+            }
           }
         }
       }
@@ -252,7 +263,7 @@ export async function getEventAttendanceData(churchSlug: string, eventId: string
     // Optimized parallel data fetching
     const [churchResult, logsResult, membersResult] = await Promise.all([
       supabase.schema('church').from('churches').select('id, passkey, name').eq('slug', churchSlug).single(),
-      supabase.schema('church').from('attendance_logs').select('member_id').eq('event_id', eventId),
+      supabase.schema('church').from('attendance_logs').select('member_id').eq('event_id', eventId).in('attendance_status', ['present', 'late']),
       supabase.schema('church').from('members').select('id, full_name, phone_number').eq('church_id', (await supabase.schema('church').from('churches').select('id').eq('slug', churchSlug).single()).data?.id).order('full_name')
     ]);
 
@@ -341,8 +352,7 @@ export async function markAttendance(churchSlug: string, eventId: string, member
     }
 
     // 3. Update the attendance count using the RPC which is multi-tenant safe
-    // Explicitly call from the 'church' schema if that's where it is
-    await supabase.schema('church').rpc('increment_event_attendance', { p_event_id: eventId });
+    await supabase.schema('church').rpc('increment_event_attendance', { event_id: eventId });
 
     revalidatePath(`/${churchSlug}/usher/dashboard`);
     revalidatePath(`/${churchSlug}/admin/attendance`);
@@ -386,7 +396,7 @@ export async function removeAttendance(churchSlug: string, eventId: string, memb
     }
 
     // 3. Update the attendance count using the RPC
-    await supabase.schema('church').rpc('decrement_event_attendance', { p_event_id: eventId });
+    await supabase.schema('church').rpc('decrement_event_attendance', { event_id: eventId });
 
     revalidatePath(`/${churchSlug}/usher/dashboard`);
     revalidatePath(`/${churchSlug}/admin/attendance`);
@@ -445,7 +455,7 @@ export async function updateAttendanceFlagStatus(flagId: string, status: Attenda
   return { success: true };
 }
 
-export async function sendMissedYouMessages(churchId: string, churchSlug: string, eventId?: string) {
+export async function sendMissedYouMessages(churchId: string, churchSlug: string, eventId?: string, customMessage?: string) {
   try {
     const supabase = await createClient();
     const { data: { session } } = await supabase.auth.getSession();
@@ -465,13 +475,31 @@ export async function sendMissedYouMessages(churchId: string, churchSlug: string
 
     const memberIdsToMessage = new Set<string>();
     
-    // Fetch members who were absent for the event (if eventId is provided)
-    if (eventId) {
+    // If no eventId provided, try to find the most recent completed event from the last 7 days
+    let targetEventId = eventId;
+    if (!targetEventId) {
+      const { data: latestEvent } = await supabase
+        .schema('church')
+        .from('events')
+        .select('id')
+        .eq('church_id', churchId)
+        .eq('status', 'completed')
+        .order('event_date', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      
+      if (latestEvent) {
+        targetEventId = latestEvent.id;
+      }
+    }
+    
+    // Fetch members who were absent for the target event
+    if (targetEventId) {
       const { data: absentLogs, error: absentError } = await supabase
         .schema('church')
         .from('attendance_logs')
         .select('member_id')
-        .eq('event_id', eventId)
+        .eq('event_id', targetEventId)
         .eq('attendance_status', 'absent');
 
       if (absentError) return { error: absentError.message };
@@ -491,12 +519,29 @@ export async function sendMissedYouMessages(churchId: string, churchSlug: string
 
     if (flagsError) return { error: flagsError.message };
 
-    // Add flagged members
+    // Fetch members who were PRESENT for the target event to EXCLUDE them
+    const presentMemberIds = new Set<string>();
+    if (targetEventId) {
+      const { data: presentLogs } = await supabase
+        .schema('church')
+        .from('attendance_logs')
+        .select('member_id')
+        .eq('event_id', targetEventId)
+        .in('attendance_status', ['present', 'late']);
+      
+      if (presentLogs) {
+        presentLogs.forEach(log => presentMemberIds.add(log.member_id));
+      }
+    }
+
+    // Add flagged members, but ONLY if they weren't present at the current event
     const flagsByMemberId = new Map<string, string>(); // member_id -> flag_id
     if (openFlags) {
       openFlags.forEach(flag => {
-        memberIdsToMessage.add(flag.member_id);
-        flagsByMemberId.set(flag.member_id, flag.id);
+        if (!presentMemberIds.has(flag.member_id)) {
+          memberIdsToMessage.add(flag.member_id);
+          flagsByMemberId.set(flag.member_id, flag.id);
+        }
       });
     }
 
@@ -516,9 +561,25 @@ export async function sendMissedYouMessages(churchId: string, churchSlug: string
     if (membersError) return { error: membersError.message };
     if (!members || members.length === 0) return { success: true, count: 0 };
 
-    const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
-    const cookieStore = await cookies();
-    const cookieHeader = cookieStore.getAll().map(c => `${c.name}=${c.value}`).join('; ');
+    // Get church config and balance once
+    const { data: church } = await supabase
+      .schema('church')
+      .from('churches')
+      .select('sender_id')
+      .eq('id', churchId)
+      .maybeSingle();
+
+    const { data: balance } = await supabase
+      .schema('public')
+      .from('wallets')
+      .select('balance, sms_rate')
+      .eq('tenant_id', churchId)
+      .maybeSingle();
+
+    if (!balance) return { error: 'Billing account not found' };
+
+    const isSandbox = process.env.AT_USERNAME?.toLowerCase() === 'sandbox';
+    const senderId = (!isSandbox && church?.sender_id) ? church.sender_id.trim() : '';
 
     let sentCount = 0;
 
@@ -526,24 +587,31 @@ export async function sendMissedYouMessages(churchId: string, churchSlug: string
       if (!member.phone_number) continue;
 
       const firstName = member.full_name.split(' ')[0] || 'there';
-      const message = `Hello ${firstName}! we missed you  at church today. We pray you are well and hope to see you again next time. Blessings from your church family.`;
+      const defaultMessage = `Hello ${firstName}! we missed you  at church today. We pray you are well and hope to see you again next time. Blessings from your church family.`;
+      
+      const message = customMessage 
+        ? customMessage.replace(/{name}/gi, member.full_name).replace(/{first_name}/gi, firstName)
+        : defaultMessage;
       
       try {
-        const res = await fetch(`${appUrl}/api/sms/send`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Cookie': cookieHeader
-          },
-          body: JSON.stringify({ 
-            phoneNumber: member.phone_number, 
-            message, 
-            churchId 
-          })
+        if (balance.balance < balance.sms_rate) {
+          console.warn('[sendMissedYouMessages] Halted: Insufficient balance');
+          break;
+        }
+
+        const result = await sendSingleSMS({
+          supabase,
+          phoneNumber: member.phone_number,
+          message,
+          churchId,
+          idempotencyKey: `missed_${churchId.slice(0, 8)}_${member.id}_${Date.now()}`,
+          senderId,
+          balance
         });
 
-        if (res.ok) {
+        if (result.success) {
           sentCount++;
+          balance.balance -= balance.sms_rate;
           // Close the flag if they had one
           const flagId = flagsByMemberId.get(member.id);
           if (flagId) {
@@ -553,12 +621,13 @@ export async function sendMissedYouMessages(churchId: string, churchSlug: string
               .update({ status: 'followed_up' })
               .eq('id', flagId);
           }
-        } else {
-          console.error(`Failed to send SMS to ${member.phone_number}:`, await res.text());
         }
       } catch (err) {
-        console.error(`Failed to invoke SMS API for ${member.phone_number}:`, err);
+        console.error(`Failed to send SMS to ${member.phone_number}:`, err);
       }
+      
+      // Small delay to avoid hitting AT rate limits
+      await new Promise(r => setTimeout(r, 100));
     }
 
     return { success: true, count: sentCount };
