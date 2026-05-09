@@ -1,4 +1,4 @@
-import { createClient } from './supabase/server';
+import { createAdminClient } from './supabase/server';
 
 export interface Church {
   id: string;
@@ -9,18 +9,24 @@ export interface Church {
 }
 
 export const getChurchBySlug = async (slug: string): Promise<Church | null> => {
-  // If Supabase is configured, try to fetch from it
-  if (process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY) {
+  // Use Admin Client to bypass RLS for public church metadata lookup
+  if (process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY) {
     try {
-      const supabase = await createClient();
+      const supabase = await createAdminClient();
+      console.log(`[getChurchBySlug] Searching for slug: ${slug}`);
       const { data, error } = await supabase
         .schema('church')
         .from('churches')
         .select('*')
-        .eq('slug', slug)
+        .ilike('slug', slug)
         .maybeSingle();
 
-      if (!error && data) {
+      if (error) {
+        console.error(`[getChurchBySlug] Error fetching church:`, error);
+      }
+      
+      if (data) {
+        console.log(`[getChurchBySlug] Found church:`, data.name);
         return {
           id: data.id,
           name: data.name || data.slug,
@@ -28,17 +34,14 @@ export const getChurchBySlug = async (slug: string): Promise<Church | null> => {
           themeColor: data.theme_color || 'bg-blue-600',
           logoUrl: data.logo_url || `https://picsum.photos/seed/${slug}/200/200`,
         };
-      }
-      
-      if (error) {
-        if (error.message?.includes('Could not find the table') || error.message?.includes('Invalid schema')) {
-          console.info(`[Supabase] Schema 'church' or table 'churches' not accessible. Falling back to mock data.`);
-        } else {
-          console.warn(`[Supabase] Fetch failed for slug ${slug}:`, error.message);
-        }
+      } else {
+        console.warn(`[getChurchBySlug] No church found for slug: ${slug}`);
+        // DEBUG: List all churches to see what's available
+        const { data: allChurches } = await supabase.schema('church').from('churches').select('slug');
+        console.log(`[getChurchBySlug] Available slugs in DB:`, allChurches?.map(c => c.slug).join(', ') || 'NONE');
       }
     } catch (err) {
-      console.error('Supabase client error:', err);
+      console.error('Supabase admin client error:', err);
     }
   }
 

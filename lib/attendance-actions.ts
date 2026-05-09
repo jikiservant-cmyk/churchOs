@@ -10,42 +10,36 @@ const JWT_SECRET = new TextEncoder().encode(process.env.SUPABASE_SERVICE_ROLE_KE
 
 export async function validateUsherPasskey(churchSlug: string, passkey: string) {
   try {
-    console.log('Validating passkey for:', churchSlug);
+    console.log('[validateUsherPasskey] Validating for slug:', churchSlug, 'with passkey:', passkey);
     const supabase = await createAdminClient();
     
-    // 1. Validate church exists and passkey is correct
-    const { data, error } = await supabase
-      .rpc('validate_usher_passkey', {
-        p_church_slug: churchSlug,
-        p_passkey: passkey
-      });
+    // Use ilike logic or explicit lowercase to ensure slug matches even if URL is mixed case
+    const { data: church } = await supabase
+      .schema('church')
+      .from('churches')
+      .select('id, name, passkey')
+      .ilike('slug', churchSlug)
+      .maybeSingle();
 
-    if (error) {
-      console.error('RPC Error:', error);
-      return { success: false, error: `Database error: ${error.message}` };
+    if (!church) {
+      console.error('[validateUsherPasskey] No church found for slug:', churchSlug);
+      return { success: false, error: 'Church not found.' };
     }
 
-    const result = Array.isArray(data) ? data[0] : data;
-    
-    let churchId: string | null = null;
-    let churchName: string | null = null;
-    let isValid = false;
+    console.log('[validateUsherPasskey] Found church:', church.name, 'Expected Passkey:', church.passkey);
 
-    if (typeof result === 'object' && result !== null) {
-      churchId = result.church_id || result.id;
-      churchName = result.church_name || result.name;
-      isValid = result.valid === true || !!churchId;
-    }
-
-    if (!isValid || !churchId) {
+    if (church.passkey !== passkey) {
       return { success: false, error: 'Invalid passkey. Please check and try again.' };
     }
+
+    const churchId = church.id;
+    const churchName = church.name;
 
     // 2. Create a cryptographically signed JWT for the session
     const token = await new SignJWT({
       church_id: churchId,
       church_name: churchName,
-      church_slug: churchSlug,
+      church_slug: churchSlug.toLowerCase(),
       role: 'usher'
     })
       .setProtectedHeader({ alg: 'HS256' })

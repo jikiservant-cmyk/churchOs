@@ -2,6 +2,7 @@
 
 import { createAdminClient, createClient } from '@/lib/supabase/server';
 import { redirect } from 'next/navigation';
+import { headers } from 'next/headers';
 
 export type ProvisionState = {
   error?: string;
@@ -15,6 +16,12 @@ export async function provisionTenant(prevState: ProvisionState, formData: FormD
   const name = (formData.get('name') as string || '').trim();
   const rawSlug = (formData.get('slug') as string || '').toLowerCase().trim();
   const appType = 'church';
+
+  // IP detection for scam prevention
+  const headerList = await headers();
+  const ip = headerList.get('x-forwarded-for')?.split(',')[0] || 
+             headerList.get('x-real-ip') || 
+             'unknown';
 
   // 0. Robust Input Validation
   if (!name || name.length < 3 || name.length > 50) {
@@ -54,6 +61,20 @@ export async function provisionTenant(prevState: ProvisionState, formData: FormD
     return { error: 'Your account is already associated with a ministry workspace.' };
   }
 
+  // 1.2 IP Rate Limiting: Check if IP has already registered a church
+  if (ip !== 'unknown' && ip !== '127.0.0.1' && ip !== '::1') {
+    const { data: ipChurch } = await adminSupabase
+      .schema('church')
+      .from('churches')
+      .select('id')
+      .eq('ip_address', ip)
+      .maybeSingle();
+
+    if (ipChurch) {
+      return { error: 'Only one church registration is allowed per network/location to prevent scams.' };
+    }
+  }
+
   let currentStep = 'initializing';
   try {
     // 0. Robust Input Sanitization (Unicode Normalization)
@@ -68,7 +89,8 @@ export async function provisionTenant(prevState: ProvisionState, formData: FormD
         p_user_id: user.id,
         p_name: sanitizedName,
         p_slug: sanitizedSlug,
-        p_role: 'pastor'
+        p_role: 'pastor',
+        p_ip_address: ip
       });
 
     if (rpcError) {

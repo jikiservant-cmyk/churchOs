@@ -1,23 +1,31 @@
-import { createClient } from './lib/supabase/server.ts';
+console.log('SCRIPT STARTING');
+import { createAdminClient } from './lib/supabase/server';
 
-async function testConnection() {
+async function getPasskey() {
+  console.log('GETTING PASSKEY');
   try {
-    const supabase = await createClient();
-    const { data, error } = await supabase.from('tenants').select('*').limit(1);
-    
+    const supabase = await createAdminClient();
+    console.log('CLIENT CREATED');
+    const { data, error } = await supabase
+      .schema('church')
+      .from('churches')
+      .select('name, slug, passkey')
+      .ilike('slug', 'ghw')
+      .maybeSingle();
+
     if (error) {
-      console.error('Connection failed:', error.message);
-      if (error.message.includes('relation "public.tenants" does not exist')) {
-        console.log('--- ACTION REQUIRED ---');
-        console.log('The database connection is working, but the tables are missing.');
-        console.log('Please make sure you ran the SQL from supabase-schema.sql in the Supabase SQL Editor.');
-      }
+      console.error('DATABASE ERROR:', error.message);
+    } else if (data) {
+      console.log('--- Church Details ---');
+      console.log('Name:', data.name);
+      console.log('Slug:', data.slug);
+      console.log('Passkey:', data.passkey);
     } else {
-      console.log('Connection successful! Found', data?.length, 'tenants.');
+      console.log('No church found with slug "ghw"');
     }
   } catch (err) {
     console.error('Unexpected error:', err);
   }
 }
 
-testConnection();
+getPasskey();

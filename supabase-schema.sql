@@ -134,6 +134,18 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'unique_church_slug') THEN
     ALTER TABLE church.churches ADD CONSTRAINT unique_church_slug UNIQUE (slug);
   END IF;
+
+  -- Add IP Address column to churches
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'church' AND table_name = 'churches' AND column_name = 'ip_address') THEN
+    ALTER TABLE church.churches ADD COLUMN ip_address text;
+    CREATE INDEX idx_church_ip_address ON church.churches(ip_address);
+  END IF;
+
+  -- Add IP Address column to admin_profiles
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'admin_profiles' AND column_name = 'ip_address') THEN
+    ALTER TABLE public.admin_profiles ADD COLUMN ip_address text;
+    CREATE INDEX idx_admin_ip_address ON public.admin_profiles(ip_address);
+  END IF;
 END $$;
 
 -- RPC: Atomic Provisioning Function
@@ -142,7 +154,8 @@ CREATE OR REPLACE FUNCTION public.provision_church_v2(
   p_user_id uuid,
   p_name text,
   p_slug text,
-  p_role text
+  p_role text,
+  p_ip_address text DEFAULT NULL
 )
 RETURNS uuid
 LANGUAGE plpgsql
@@ -165,6 +178,15 @@ BEGIN
     WHERE lower(slug) = lower(p_slug)
   ) THEN
     RAISE EXCEPTION 'Workspace URL (slug) is already taken';
+  END IF;
+
+  -- 2b. IP Check: Only one church per IP to reduce scams
+  IF p_ip_address IS NOT NULL AND EXISTS (
+    SELECT 1
+    FROM church.churches
+    WHERE ip_address = p_ip_address
+  ) THEN
+    RAISE EXCEPTION 'Only one church registration is allowed per network/location.';
   END IF;
 
   -- 3. Identity Resolution (email)
@@ -190,26 +212,27 @@ BEGIN
 
   -- b) Create Church Link
   -- church.churches uses: id, name, slug, app_type, ...
-  INSERT INTO church.churches (id, name, slug, app_type)
-  VALUES (v_tenant_id, p_name, p_slug, 'church');
+  INSERT INTO church.churches (id, name, slug, app_type, ip_address)
+  VALUES (v_tenant_id, p_name, p_slug, 'church', p_ip_address);
 
   -- c) Create Admin Profile (Owner)
-  -- admin_profiles uses: id (FK to auth.users), tenant_id, role, app_type, email, full_name
-  INSERT INTO public.admin_profiles (id, tenant_id, email, app_type, role, full_name)
-  VALUES (p_user_id, v_tenant_id, v_user_email, 'church', p_role::admin_role_enum, p_name)
+  -- admin_profiles uses: id (FK to auth.users), tenant_id, role, app_type, email, full_name, ip_address
+  INSERT INTO public.admin_profiles (id, tenant_id, email, app_type, role, full_name, ip_address)
+  VALUES (p_user_id, v_tenant_id, v_user_email, 'church', p_role::admin_role_enum, p_name, p_ip_address)
   ON CONFLICT (id) DO UPDATE SET
     tenant_id = EXCLUDED.tenant_id,
     app_type = EXCLUDED.app_type,
     role = EXCLUDED.role,
     email = EXCLUDED.email,
-    full_name = EXCLUDED.full_name;
+    full_name = EXCLUDED.full_name,
+    ip_address = EXCLUDED.ip_address;
 
   RETURN v_tenant_id;
 END;
 $$;
 
 -- Explicit Permission Grants
-GRANT EXECUTE ON FUNCTION public.provision_church_v2(uuid, text, text, text)
+GRANT EXECUTE ON FUNCTION public.provision_church_v2(uuid, text, text, text, text)
 TO authenticated, service_role;
 
 GRANT USAGE ON SCHEMA public TO authenticated, service_role;
@@ -651,6 +674,12 @@ ALTER TABLE church.attendance_flags ENABLE ROW LEVEL SECURITY;
 ALTER TABLE church.prayers ENABLE ROW LEVEL SECURITY;
 ALTER TABLE church.small_groups ENABLE ROW LEVEL SECURITY;
 ALTER TABLE church.donations ENABLE ROW LEVEL SECURITY;
+
+-- Church Metadata Policy (Publicly viewable for landing pages/portals)
+CREATE POLICY "Churches are viewable by everyone" 
+  ON church.churches FOR SELECT 
+  TO public 
+  USING (true);
 
 -- Additional RLS Policies
 CREATE POLICY "Pastors can manage their attendance logs" ON church.attendance_logs FOR ALL TO authenticated

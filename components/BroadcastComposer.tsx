@@ -1,8 +1,7 @@
 'use client';
 
 import { useState, useRef } from 'react';
-import { Send, AlertCircle, Loader2 } from 'lucide-react';
-import { createClient } from '@/lib/supabase/client';
+import { Send, AlertCircle, Loader2, Sparkles } from 'lucide-react';
 import { normalizeUgPhone } from '@/lib/utils';
 import { useRouter } from 'next/navigation';
 
@@ -12,6 +11,7 @@ export default function BroadcastComposer({ members, churchId }: {
 }) {
   const [message, setMessage] = useState('');
   const [isSending, setIsSending] = useState(false);
+  const [isGenerating, setIsGenerating] = useState(false);
   const [audience, setAudience] = useState<'all' | 'men' | 'women' | 'youth' | 'new_converts'>('all');
   const [recipientLimit, setRecipientLimit] = useState<number | ''>('');
   const [progress, setProgress] = useState({ active: false, total: 0, sent: 0, failed: 0 });
@@ -39,6 +39,38 @@ export default function BroadcastComposer({ members, churchId }: {
     new_converts: 'New Converts'
   };
 
+  const generateWithAI = async () => {
+    if (isGenerating) return;
+    const prompt = window.prompt("What would you like the message to be about? (e.g. 'Invite people to Sunday service')");
+    if (!prompt) return;
+
+    setIsGenerating(true);
+    setMessage('');
+    try {
+      const response = await fetch('/api/ai/generate-message', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt, context: `Church: ${churchId}, Audience: ${audienceLabels[audience]}` }),
+      });
+
+      if (!response.ok) throw new Error('Failed to generate message');
+
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error('No reader available');
+
+      const decoder = new TextDecoder();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        setMessage(prev => prev + decoder.decode(value));
+      }
+    } catch (err: any) {
+      alert(err.message || 'Error generating message');
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
   const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!message.trim() || finalMembers.length === 0 || sendingRef.current) return;
@@ -48,95 +80,56 @@ export default function BroadcastComposer({ members, churchId }: {
     setProgress({ active: true, total: finalMembers.length, sent: 0, failed: 0 });
     
     try {
-      const tenantId = churchId; // church uuid
-      let haltedReason = '';
+      const response = await fetch('/api/sms/broadcast', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message,
+          churchId,
+          recipients: finalMembers.map(m => ({
+            full_name: m.full_name,
+            phone_number: normalizeUgPhone(m.phone_number)
+          }))
+        })
+      });
 
-      for (const m of finalMembers) {
-        try {
-          if (!m.phone_number) {
+      if (!response.ok) throw new Error('Failed to start broadcast');
+
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error('No reader available');
+
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          const update = JSON.parse(line);
+
+          if (update.type === 'success') {
+            setProgress(p => ({ ...p, sent: p.sent + 1 }));
+          } else if (update.type === 'error') {
             setProgress(p => ({ ...p, failed: p.failed + 1 }));
-            continue;
+          } else if (update.type === 'halt') {
+            alert(`Broadcast halted: ${update.reason}`);
+            break;
           }
-
-          const phone = normalizeUgPhone(m.phone_number);
-          const idempotencyKey = typeof crypto !== 'undefined' && crypto.randomUUID 
-            ? crypto.randomUUID() 
-            : Math.random().toString(36).substring(2, 15);
-
-          const personalizedMessage = message
-            .replace(/{name}/gi, m.full_name || 'Member')
-            .replace(/{first_name}/gi, (m.full_name || 'Member').split(' ')[0]);
-
-          // We use a manual fetch instead of supabase.functions.invoke to aggressively prevent 
-          // the Supabase SDK from crashing the browser runtime if the edge function returns a raw HTML 404 
-          // (e.g. "An unexpected response was received from the server").
-          try {
-            const res = await fetch('/api/sms/send', {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-              },
-              signal: AbortSignal.timeout(15000), // 15 second timeout to prevent hanging fetches
-              body: JSON.stringify({ phoneNumber: phone, message: personalizedMessage, churchId: tenantId, idempotencyKey: idempotencyKey })
-            });
-
-            if (!res.ok) {
-              const text = await res.text().catch(() => '');
-              let errorData: any = {};
-              try {
-                if (text && (text.startsWith('{') || text.startsWith('['))) {
-                  errorData = JSON.parse(text);
-                }
-              } catch (parseErr) {
-                console.warn('[BroadcastComposer] Could not parse error response as JSON:', text.substring(0, 50));
-              }
-
-              if (res.status === 402) {
-                // Graceful billing interruption: Break the loop and inform the user peacefully
-                const safeError = errorData.error?.replace(/\.$/, '') || 'Insufficient SMS balance';
-                haltedReason = `Broadcast paused: ${safeError}. You have ${errorData.remaining || 0} SMS credits remaining. Please top up your account to finish sending.`;
-                break;
-              }
-
-              console.error(`SMS failed for ${m.full_name}. Status: ${res.status}. Error:`, text);
-              setProgress(p => ({ ...p, failed: p.failed + 1 }));
-            } else {
-              setProgress(p => ({ ...p, sent: p.sent + 1 }));
-            }
-          } catch (invokeCatch: any) {
-             const isNetworkError = invokeCatch?.name === 'TypeError' || invokeCatch?.message?.includes('fetch');
-             console.error(`[BroadcastComposer] ${isNetworkError ? 'Network Error' : 'Fetch exception'} for ${m.full_name}:`, invokeCatch?.message || invokeCatch);
-             setProgress(p => ({ ...p, failed: p.failed + 1 }));
-             
-             if (isNetworkError) {
-               // If it's a network error, maybe wait a bit longer before retrying next member
-               await new Promise(r => setTimeout(r, 1000));
-             }
-          }
-        } catch (internalErr: any) {
-          const errorMessage = internalErr?.message || 'Unknown internal error';
-          console.error(`Skipping ${m.full_name} due to crash:`, errorMessage);
-          setProgress(p => ({ ...p, failed: p.failed + 1 }));
         }
-
-        // Slight artificial delay to prevent rate-limiting the local Next.js API router
-        await new Promise(r => setTimeout(r, 100));
       }
 
-      if (haltedReason) {
-        // We broke out of the loop intentionally due to billing
-        alert(haltedReason);
-        router.refresh(); // Refresh to show newly depleted balance
-      } else {
-        // Normal completion
-        await new Promise(r => setTimeout(r, 600)); 
-        alert(`Broadcast Complete! 🚀`);
-        setMessage('');
-        router.refresh(); // Refresh to show newly depleted balance
-      }
+      alert(`Broadcast Complete! 🚀`);
+      setMessage('');
+      router.refresh();
     } catch (err: any) {
       console.error(err);
-      alert(err.message || "Failed to securely connect for broadcast. Please try again.");
+      alert(err.message || "Failed to complete broadcast.");
     } finally {
       setIsSending(false);
       setProgress(p => ({ ...p, active: false }));
@@ -146,10 +139,24 @@ export default function BroadcastComposer({ members, churchId }: {
 
   return (
     <div className="bg-[#F0E6D3] rounded-2xl border border-[rgba(90,55,20,0.13)] p-8 shadow-sm">
-      <h2 style={{ fontFamily: "'Playfair Display', serif" }} className="text-xl font-bold text-[#1E1208] mb-6 flex items-center gap-2">
-        <Send className="w-5 h-5 text-[#B5622A]" />
-        New Broadcast
-      </h2>
+      <div className="flex justify-between items-center mb-6">
+        <h2 style={{ fontFamily: "'Playfair Display', serif" }} className="text-xl font-bold text-[#1E1208] flex items-center gap-2">
+          <Send className="w-5 h-5 text-[#B5622A]" />
+          New Broadcast
+        </h2>
+        <button
+          onClick={generateWithAI}
+          disabled={isGenerating || isSending}
+          className="flex items-center gap-2 px-4 py-2 bg-[#B5622A]/10 text-[#B5622A] rounded-xl text-xs font-bold hover:bg-[#B5622A]/20 transition-all disabled:opacity-50"
+        >
+          {isGenerating ? (
+            <Loader2 className="w-4 h-4 animate-spin" />
+          ) : (
+            <Sparkles className="w-4 h-4" />
+          )}
+          Generate with AI
+        </button>
+      </div>
 
       <form onSubmit={handleSend} className="space-y-6">
         <div className="bg-[rgba(181,98,42,0.05)] border border-[rgba(181,98,42,0.12)] rounded-xl p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
