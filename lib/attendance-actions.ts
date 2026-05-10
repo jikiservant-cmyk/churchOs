@@ -294,8 +294,9 @@ async function checkAuthorization(churchSlug: string, eventId: string) {
   }
   
   // 1. Is there an usher session for this church?
-  const usherSession = await getUsherSession(churchSlug);
-  if (usherSession && usherSession.church_slug === churchSlug && usherSession.church_id === event.church_id) {
+  // We use ilike or normalize to lowercase to match the cookie name logic
+  const usherSession = await getUsherSession(churchSlug.toLowerCase());
+  if (usherSession && usherSession.church_slug === churchSlug.toLowerCase() && usherSession.church_id === event.church_id) {
     return { adminClient, allowed: true };
   }
 
@@ -304,21 +305,18 @@ async function checkAuthorization(churchSlug: string, eventId: string) {
   const { data: { user } } = await client.auth.getUser();
 
   if (user) {
-    const { data: profile } = await adminClient.from('admin_profiles').select('tenant_id').eq('id', user.id).maybeSingle();
-    if (profile && profile.tenant_id === event.church_id) {
-       // Make sure churchSlug matches the tenant (rough check, strictly we check the event's church_id)
-       const { data: church } = await adminClient.schema('church').from('churches').select('slug').eq('id', event.church_id).maybeSingle();
-       if (church && church.slug === churchSlug) {
+      const { data: profile } = await adminClient.from('admin_profiles').select('tenant_id').eq('id', user.id).maybeSingle();
+      if (profile && profile.tenant_id === event.church_id) {
          return { adminClient, allowed: true };
-       }
+      }
     }
-  }
 
   throw new Error('Unauthorized to modify this event.');
 }
 
 export async function markAttendance(churchSlug: string, eventId: string, memberId: string, status: 'present' | 'late' | 'absent' | 'excused' = 'present') {
   try {
+    console.log(`[markAttendance] Marking ${memberId} as ${status} for event ${eventId} (Slug: ${churchSlug})`);
     const { adminClient: supabase } = await checkAuthorization(churchSlug, eventId);
     
     // 1. Get the church_id from the event first

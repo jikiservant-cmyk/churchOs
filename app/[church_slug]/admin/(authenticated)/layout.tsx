@@ -2,7 +2,6 @@ import { getChurchBySlug } from '@/lib/db';
 import { createClient } from '@/lib/supabase/server';
 import { redirect, notFound } from 'next/navigation';
 import AdminSidebar from '@/components/AdminSidebar';
-import { Suspense } from 'react';
 
 export default async function AdminLayout({ 
   children, 
@@ -11,8 +10,8 @@ export default async function AdminLayout({
   children: React.ReactNode, 
   params: Promise<{ church_slug: string }> 
 }) {
-  const resolvedParams = await params;
-  const church = await getChurchBySlug(resolvedParams.church_slug);
+  const { church_slug } = await params;
+  const church = await getChurchBySlug(church_slug);
 
   if (!church) {
     notFound();
@@ -36,7 +35,7 @@ export default async function AdminLayout({
     redirect(`/?error=Access Denied`);
   }
 
-  // Church Mismatch Check
+  // Church Mismatch Check - Simplified to just one potential redirect
   if (profile.tenant_id && church.id !== profile.tenant_id) {
     const { data: correctChurch } = await supabase
       .schema('church')
@@ -45,8 +44,19 @@ export default async function AdminLayout({
       .eq('id', profile.tenant_id)
       .maybeSingle();
       
-    if (correctChurch?.slug && correctChurch.slug !== resolvedParams.church_slug) {
+    if (correctChurch?.slug && correctChurch.slug !== church_slug) {
       redirect(`/${correctChurch.slug}/admin`);
+    } else {
+       // If mismatch but no clear home, just render error instead of redirect loop
+       return (
+         <div className="min-h-screen bg-[#E4D5BC] flex items-center justify-center p-12 text-center">
+            <div className="bg-[#F0E6D3] p-8 rounded-3xl border border-[#B5622A]/20 shadow-xl max-w-md">
+               <h2 className="text-2xl font-bold text-[#1E1208] mb-4">Church Mismatch</h2>
+               <p className="text-[#9A7E65]">You are not authorized to manage this church portal. Please contact support if this is an error.</p>
+               <a href="/" className="inline-block mt-6 px-6 py-2 bg-[#2B1A0E] text-[#F5E6CE] rounded-xl font-bold uppercase tracking-widest text-xs">Return Home</a>
+            </div>
+         </div>
+       );
     }
   }
 
@@ -55,13 +65,11 @@ export default async function AdminLayout({
       style={{ fontFamily: "'Outfit', sans-serif" }}
       className="min-h-screen bg-[#E4D5BC] flex"
     >
-      <AdminSidebar church={church} churchSlug={resolvedParams.church_slug} />
+      <AdminSidebar church={church} churchSlug={church_slug} />
       <main className="flex-1 overflow-y-auto px-6 py-8 md:px-12 md:py-10">
-        <Suspense fallback={<div>Loading content...</div>}>
-          <div className="max-w-7xl mx-auto">
-            {children}
-          </div>
-        </Suspense>
+        <div className="max-w-7xl mx-auto">
+          {children}
+        </div>
       </main>
     </div>
   );

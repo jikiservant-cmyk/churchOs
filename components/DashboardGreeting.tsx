@@ -3,19 +3,19 @@
 import { useEffect, useState } from 'react';
 
 export default function DashboardGreeting({ pastorName }: { pastorName: string }) {
-  const [time, setTime] = useState(new Date());
+  const [time, setTime] = useState<Date | null>(null);
   const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     setMounted(true);
+    setTime(new Date());
     // Update time every minute
     const timer = setInterval(() => setTime(new Date()), 60000);
     return () => clearInterval(timer);
   }, []);
 
   // During hydration, render a consistent shell
-  if (!mounted) {
+  if (!mounted || !time) {
     return (
       <div className="mb-10 animate-pulse">
         <h2 style={{ fontFamily: "'Playfair Display', serif" }} className="text-3xl font-bold text-[#1E1208] leading-tight">

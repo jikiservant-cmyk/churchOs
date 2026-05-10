@@ -1,8 +1,7 @@
 import type {Metadata} from 'next';
 import { Outfit, Playfair_Display } from 'next/font/google';
 import './globals.css';
-import SWRegistration from '@/components/SWRegistration';
-import SplashScreen from '@/components/SplashScreen';
+import GlobalClientWrapper from '@/components/GlobalClientWrapper';
 
 const outfit = Outfit({
   subsets: ['latin'],
@@ -29,9 +28,9 @@ export default function RootLayout({children}: {children: React.ReactNode}) {
   return (
     <html lang="en" className={`${outfit.variable} ${playfair.variable}`}>
       <body suppressHydrationWarning>
-        <SplashScreen />
-        <SWRegistration />
-        {children}
+        <GlobalClientWrapper>
+          {children}
+        </GlobalClientWrapper>
       </body>
     </html>
   );

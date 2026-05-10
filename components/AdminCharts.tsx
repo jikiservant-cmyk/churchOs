@@ -1,5 +1,6 @@
 'use client';
 
+import { useEffect, useState } from 'react';
 import {
   PieChart,
   Pie,
@@ -29,8 +30,27 @@ export function AdminCharts({
   donationsData?: { month: string, amount: number }[],
   attendanceData?: { name: string, count: number }[]
 }) {
+  const [mounted, setMounted] = useState(false);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  if (!mounted) {
+    return (
+      <div className="space-y-5 mb-5 opacity-0">
+        <div className="h-[300px] bg-[#F0E6D3] rounded-2xl animate-pulse" />
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+          <div className="h-[250px] bg-[#F0E6D3] rounded-2xl animate-pulse" />
+          <div className="h-[250px] bg-[#F0E6D3] rounded-2xl animate-pulse" />
+          <div className="h-[250px] bg-[#F0E6D3] rounded-2xl animate-pulse" />
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="space-y-5 mb-5">
+    <div className="space-y-5 mb-5 animate-in fade-in duration-500">
       {/* Attendance History */}
       {attendanceData && (
         <div className="bg-[#F0E6D3] border border-[rgba(90,55,20,0.13)] rounded-2xl p-6 shadow-sm flex flex-col">
