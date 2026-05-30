@@ -26,6 +26,9 @@ export async function sendSingleSMS({
   balance
 }: SendSMSParams) {
   const finalPhone = normalizeUgPhone(phoneNumber);
+  if (!finalPhone) {
+    throw new Error(`Invalid phone number format: "${phoneNumber}"`);
+  }
   const apiKey = process.env.AT_API_KEY;
   const username = process.env.AT_USERNAME;
 

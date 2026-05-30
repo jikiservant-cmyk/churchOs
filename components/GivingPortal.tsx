@@ -40,42 +40,41 @@ export default function GivingPortal({ church }: { church: Church }) {
     setIsSubmitting(true);
     
     try {
-      // Format properly using centralized logic
+      // Validate and format phone number
       const fullPhone = normalizeUgPhone(phone);
-
-      // Generate the unique key for this specific click/transaction (safe fallback for iframes)
-      const uniqueClickKey = typeof crypto !== 'undefined' && crypto.randomUUID 
-        ? crypto.randomUUID() 
-        : Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
-
-      try {
-        const res = await fetch('/api/sms/send', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          signal: AbortSignal.timeout(10000), // 10 second timeout
-          body: JSON.stringify({
-            phoneNumber: fullPhone,
-            message: `Hallelujah! Your ${category} of ${amount} UGX has been received.`,
-            churchId: church.id
-          })
-        });
-
-        if (!res.ok) {
-           const errText = await res.text().catch(() => '');
-           console.error("Giving Payment SMS failed:", res.status, errText);
-        }
-      } catch (err: any) {
-        if (err?.name === 'TypeError' || err?.message?.includes('fetch')) {
-           console.error("Critical SMS network failure (Failed to fetch):", err.message);
-        } else {
-           console.error("Critical SMS failure:", err);
-        }
+      if (!fullPhone) {
+        alert('Please enter a valid Ugandan phone number.');
+        setIsSubmitting(false);
+        return;
       }
 
-      alert('Payment initiated! You will receive an SMS confirmation shortly.');
+      // 1. Initiate the MoMo payment prompt
+      const res = await fetch('/api/payment/initiate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(15000),
+        body: JSON.stringify({
+          phoneNumber: fullPhone,
+          amount: parseInt(amount.replace(/,/g, ''), 10),
+          category,
+          churchId: church.id,
+        }),
+      });
+
+      if (!res.ok) {
+        const errText = await res.text().catch(() => '');
+        console.error('Payment initiation failed:', res.status, errText);
+        alert('Failed to initiate payment. Please try again.');
+        return;
+      }
+
+      // 2. Only notify the user AFTER the payment request is accepted by the provider
+      // The confirmation SMS should be sent from the server-side webhook once payment
+      // is actually confirmed by the mobile money provider — NOT here on the client.
+      alert('Payment prompt sent to your phone! Please approve it on your handset.');
     } catch (err) {
-      console.error("Error during submission:", err);
-      alert('Payment initiated! Check your phone for the MoMo prompt.');
+      console.error('Error during submission:', err);
+      alert('Something went wrong. Please try again.');
     } finally {
       setIsSubmitting(false);
       setAmount('');

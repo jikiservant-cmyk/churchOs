@@ -105,10 +105,12 @@ export default function BroadcastComposer({ members, churchId }: {
         body: JSON.stringify({
           message,
           churchId,
-          recipients: finalMembers.map(m => ({
-            full_name: m.full_name,
-            phone_number: normalizeUgPhone(m.phone_number)
-          }))
+          recipients: finalMembers
+            .map(m => ({
+              full_name: m.full_name,
+              phone_number: normalizeUgPhone(m.phone_number)
+            }))
+            .filter(m => m.phone_number !== null)
         })
       });
 

@@ -37,11 +37,10 @@ export async function addMember(formData: FormData) {
     const isYouth = formData.get('isYouth') === 'true';
       let formattedPhone = null;
       if (phone) {
-        try {
-          formattedPhone = normalizeUgPhone(phone);
-        } catch (err: any) {
-          console.error(err);
-          formattedPhone = phone.trim();
+        formattedPhone = normalizeUgPhone(phone);
+        if (!formattedPhone) {
+          searchParams = new URLSearchParams({ error: 'Invalid phone number format. Please enter a valid Ugandan number.' }).toString();
+          redirect(`/${churchSlug}/admin/members?${searchParams}`);
         }
       }
 
@@ -137,13 +136,14 @@ export async function editMember(formData: FormData) {
     const birthday = formData.get('birthday') as string;
     const isYouth = formData.get('isYouth') === 'true';
 
-    let formattedPhone = phone;
+    let formattedPhone = phone || '';
     if (phone) {
-      try {
-        formattedPhone = normalizeUgPhone(phone);
-      } catch (err: any) {
-        formattedPhone = phone.trim();
+      const normalized = normalizeUgPhone(phone);
+      if (!normalized) {
+        searchParams = new URLSearchParams({ error: 'Invalid phone number format. Please enter a valid Ugandan number.' }).toString();
+        redirect(`/${churchSlug}/admin/members/edit/${memberId}?${searchParams}`);
       }
+      formattedPhone = normalized!;
     }
 
     const payload = {
@@ -190,11 +190,7 @@ export async function bulkAddMembers(churchSlug: string, membersData: any[]) {
        // Format phone if needed
        let formattedPhone = member.phone || member.phone_number || member.phoneNumber || '';
        if (formattedPhone) {
-         try {
-           formattedPhone = normalizeUgPhone(String(formattedPhone));
-         } catch(e) {
-           formattedPhone = String(formattedPhone).trim();
-         }
+         formattedPhone = normalizeUgPhone(String(formattedPhone)) ?? String(formattedPhone).trim();
        }
 
        let gender = member.gender ? String(member.gender).toLowerCase() : null;

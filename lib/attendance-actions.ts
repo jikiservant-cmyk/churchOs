@@ -7,11 +7,15 @@ import { ChurchEvent, AttendanceLog, AttendanceFlag, AttendanceFlagStatus } from
 import { SignJWT, jwtVerify } from 'jose';
 import { sendSingleSMS } from './sms-actions';
 
-const JWT_SECRET = new TextEncoder().encode(process.env.SUPABASE_SERVICE_ROLE_KEY);
+const jwtSecretValue = process.env.USHER_JWT_SECRET || process.env.SUPABASE_SERVICE_ROLE_KEY;
+if (!jwtSecretValue) {
+  throw new Error('USHER_JWT_SECRET (or SUPABASE_SERVICE_ROLE_KEY) environment variable is not set. Cannot sign usher sessions.');
+}
+const JWT_SECRET = new TextEncoder().encode(jwtSecretValue);
 
 export async function validateUsherPasskey(churchSlug: string, passkey: string) {
   try {
-    console.log('[validateUsherPasskey] Validating for slug:', churchSlug, 'with passkey:', passkey);
+    console.log('[validateUsherPasskey] Validating for slug:', churchSlug);
     const supabase = await createAdminClient();
     
     // Use ilike logic or explicit lowercase to ensure slug matches even if URL is mixed case
@@ -258,20 +262,27 @@ export async function updateChurchPasskey(churchId: string, newPasskey: string, 
 export async function getEventAttendanceData(churchSlug: string, eventId: string) {
   try {
     const supabase = await createClient();
-    const { data: event } = await supabase.schema('church').from('events').select('*').eq('id', eventId).single();
-    
-    // Optimized parallel data fetching
-    const [churchResult, logsResult, membersResult] = await Promise.all([
-      supabase.schema('church').from('churches').select('id, passkey, name').eq('slug', churchSlug).single(),
-      supabase.schema('church').from('attendance_logs').select('member_id').eq('event_id', eventId).in('attendance_status', ['present', 'late']),
-      supabase.schema('church').from('members').select('id, full_name, phone_number').eq('church_id', (await supabase.schema('church').from('churches').select('id').eq('slug', churchSlug).single()).data?.id).order('full_name')
-    ]);
 
-    const { data: church } = churchResult;
-    const { data: logs } = logsResult;
-    const { data: members } = membersResult;
+    // Fetch church first so we have the ID for the members query
+    const { data: church } = await supabase
+      .schema('church')
+      .from('churches')
+      .select('id, passkey, name')
+      .eq('slug', churchSlug)
+      .single();
 
     if (!church) return { error: 'Church not found.' };
+
+    // Now run event and attendance queries in parallel using the resolved church ID
+    const [eventResult, logsResult, membersResult] = await Promise.all([
+      supabase.schema('church').from('events').select('*').eq('id', eventId).single(),
+      supabase.schema('church').from('attendance_logs').select('member_id').eq('event_id', eventId).in('attendance_status', ['present', 'late']),
+      supabase.schema('church').from('members').select('id, full_name, phone_number').eq('church_id', church.id).order('full_name')
+    ]);
+
+    const { data: event } = eventResult;
+    const { data: logs } = logsResult;
+    const { data: members } = membersResult;
 
     return { 
       church, 
@@ -584,6 +595,19 @@ export async function sendMissedYouMessages(churchId: string, churchSlug: string
     for (const member of members) {
       if (!member.phone_number) continue;
 
+      // Re-fetch balance from DB each iteration to avoid stale reads from concurrent deductions
+      const { data: freshBalance } = await supabase
+        .schema('public')
+        .from('wallets')
+        .select('balance, sms_rate')
+        .eq('tenant_id', churchId)
+        .maybeSingle();
+
+      if (!freshBalance || freshBalance.balance < freshBalance.sms_rate) {
+        console.warn('[sendMissedYouMessages] Halted: Insufficient balance');
+        break;
+      }
+
       const firstName = member.full_name.split(' ')[0] || 'there';
       const defaultMessage = `Hello ${firstName}! we missed you  at church today. We pray you are well and hope to see you again next time. Blessings from your church family.`;
       
@@ -592,11 +616,6 @@ export async function sendMissedYouMessages(churchId: string, churchSlug: string
         : defaultMessage;
       
       try {
-        if (balance.balance < balance.sms_rate) {
-          console.warn('[sendMissedYouMessages] Halted: Insufficient balance');
-          break;
-        }
-
         const result = await sendSingleSMS({
           supabase,
           phoneNumber: member.phone_number,
@@ -604,12 +623,11 @@ export async function sendMissedYouMessages(churchId: string, churchSlug: string
           churchId,
           idempotencyKey: `missed_${churchId.slice(0, 8)}_${member.id}_${Date.now()}`,
           senderId,
-          balance
+          balance: freshBalance
         });
 
         if (result.success) {
           sentCount++;
-          balance.balance -= balance.sms_rate;
           // Close the flag if they had one
           const flagId = flagsByMemberId.get(member.id);
           if (flagId) {
