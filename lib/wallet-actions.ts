@@ -54,23 +54,28 @@ export async function initiateLivePayPayment(formData: FormData) {
     }
 
     // 2. Call LivePay API (Corrected per official docs)
+    const requestBody = {
+      accountNumber: accountNo,
+      phoneNumber: formatPhoneForLivePay(phoneNumber),
+      amount: amount,
+      currency: 'UGX',
+      reference: referenceCode,
+      description: 'ChurchOS Wallet Top-up',
+    };
+
+    console.log('[LivePay] Sending request to collect-money:', JSON.stringify({ ...requestBody, accountNumber: 'LP***' }));
+
     const response = await fetch('https://livepay.me/api/collect-money', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${apiKey}`,
       },
-      body: JSON.stringify({
-        accountNumber: accountNo,
-        phoneNumber: formatPhoneForLivePay(phoneNumber),
-        amount: amount,
-        currency: 'UGX',
-        reference: referenceCode,
-        description: 'ChurchOS Wallet Top-up',
-      }),
+      body: JSON.stringify(requestBody),
     });
 
     const result = await response.json();
+    console.log('[LivePay] API Response:', JSON.stringify(result));
 
     if (!response.ok) {
       console.error('[LivePay] API Error:', result);
@@ -141,23 +146,28 @@ export async function initiateDonationPayment(params: {
     }
 
     // 2. Call LivePay API (Corrected per official docs)
+    const requestBody = {
+      accountNumber: accountNo,
+      phoneNumber: formatPhoneForLivePay(phoneNumber),
+      amount: amount,
+      currency: 'UGX',
+      reference: referenceCode,
+      description: `${category} Donation to ${churchId}`,
+    };
+
+    console.log('[LivePay Donation] Sending request to collect-money:', JSON.stringify({ ...requestBody, accountNumber: 'LP***' }));
+
     const response = await fetch('https://livepay.me/api/collect-money', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${apiKey}`,
       },
-      body: JSON.stringify({
-        accountNumber: accountNo,
-        phoneNumber: formatPhoneForLivePay(phoneNumber),
-        amount: amount,
-        currency: 'UGX',
-        reference: referenceCode,
-        description: `${category} Donation to ${churchId}`,
-      }),
+      body: JSON.stringify(requestBody),
     });
 
     const result = await response.json();
+    console.log('[LivePay Donation] API Response:', JSON.stringify(result));
 
     if (!response.ok) {
       console.error('[LivePay Donation] API Error:', result);
@@ -235,7 +245,7 @@ export async function initiateRelworxPayment(formData: FormData) {
         'Authorization': `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
-        account_no: accountNo,
+        account_no: relworxAccountNo,
         msisdn: phoneNumber,
         amount: amount,
         currency: 'UGX',
