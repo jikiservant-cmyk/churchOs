@@ -6,6 +6,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { Heart, Gift, Sprout, Home, Smartphone, Lock, ShieldCheck, ChevronRight } from 'lucide-react';
 import type { Church } from '@/lib/db';
 import { normalizeUgPhone } from '@/lib/utils';
+import { initiateDonationPayment } from '@/lib/wallet-actions';
 
 const CATEGORIES = [
   { id: 'tithe', label: 'Tithe', icon: Heart, color: 'text-rose-500', bg: 'bg-rose-50' },
@@ -48,23 +49,17 @@ export default function GivingPortal({ church }: { church: Church }) {
         return;
       }
 
-      // 1. Initiate the MoMo payment prompt
-      const res = await fetch('/api/payment/initiate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        signal: AbortSignal.timeout(15000),
-        body: JSON.stringify({
-          phoneNumber: fullPhone,
-          amount: parseInt(amount.replace(/,/g, ''), 10),
-          category,
-          churchId: church.id,
-        }),
+      // 1. Initiate the LivePay payment prompt via server action
+      const result = await initiateDonationPayment({
+        phoneNumber: fullPhone,
+        amount: parseInt(amount.replace(/,/g, ''), 10),
+        category,
+        churchId: church.id,
       });
 
-      if (!res.ok) {
-        const errText = await res.text().catch(() => '');
-        console.error('Payment initiation failed:', res.status, errText);
-        alert('Failed to initiate payment. Please try again.');
+      if (result.error) {
+        console.error('Payment initiation failed:', result.error);
+        alert(result.error);
         return;
       }
 

@@ -4,6 +4,7 @@ import { addNewConvert, bulkAddNewConverts } from './actions';
 import CSVUploader from '@/components/CSVUploader';
 import SearchInput from '@/components/SearchInput';
 import Link from 'next/link';
+import { Suspense } from 'react';
 
 import PaginatedConvertsList from '@/components/PaginatedConvertsList';
 
@@ -57,7 +58,9 @@ export default async function NewConvertsPage(props: {
         {/* Converts List (Left Column) */}
         <div className="lg:col-span-2 bg-white rounded-xl shadow-[0_4px_24px_-8px_rgba(0,0,0,0.05)] border border-slate-100 overflow-hidden flex flex-col">
           <div className="p-5 border-b border-slate-100 flex items-center gap-4">
-            <SearchInput placeholder="Search converts by name..." />
+            <Suspense fallback={<div className="flex-1 h-10 bg-slate-100 animate-pulse rounded-xl" />}>
+              <SearchInput placeholder="Search converts by name..." />
+            </Suspense>
             <button className="px-5 py-2.5 bg-slate-100 text-slate-700 text-sm font-bold rounded-xl hover:bg-slate-200 transition-colors">
               Filter
             </button>

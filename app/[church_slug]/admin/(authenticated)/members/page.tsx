@@ -4,6 +4,7 @@ import { addMember, bulkAddMembers } from './actions';
 import CSVUploader from '@/components/CSVUploader';
 import SearchInput from '@/components/SearchInput';
 import Link from 'next/link';
+import { Suspense } from 'react';
 
 import PaginatedMembersList from '@/components/PaginatedMembersList';
 
@@ -59,7 +60,9 @@ export default async function MembersPage(props: {
         {/* Members List (Left Column) */}
         <div className="lg:col-span-2 bg-[#F0E6D3] rounded-2xl border border-[rgba(90,55,20,0.13)] overflow-hidden flex flex-col shadow-sm">
           <div className="p-5 border-b border-[rgba(90,55,20,0.08)] flex items-center gap-4">
-            <SearchInput placeholder="Search members by name..." />
+            <Suspense fallback={<div className="flex-1 h-10 bg-[rgba(90,55,20,0.05)] animate-pulse rounded-xl" />}>
+              <SearchInput placeholder="Search members by name..." />
+            </Suspense>
             <button className="px-5 py-2.5 bg-[rgba(90,55,20,0.05)] text-[#1E1208] text-sm font-bold rounded-xl hover:bg-[rgba(90,55,20,0.1)] transition-colors">
               Filter
             </button>
