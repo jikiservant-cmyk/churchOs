@@ -332,6 +332,14 @@ export async function markAttendance(churchSlug: string, eventId: string, member
     }
 
     // 2. Direct upsert into attendance_logs using Admin Client (bypasses RLS)
+    const { data: existingLog } = await supabase
+      .schema('church')
+      .from('attendance_logs')
+      .select('attendance_status')
+      .eq('member_id', memberId)
+      .eq('event_id', eventId)
+      .maybeSingle();
+
     const { error } = await supabase
       .schema('church')
       .from('attendance_logs')
@@ -341,7 +349,6 @@ export async function markAttendance(churchSlug: string, eventId: string, member
         event_id: eventId,
         attendance_status: status,
         check_in_time: new Date().toISOString()
-        // recorded_by omitted to avoid FK constraint issues with non-user ushers
       }, { onConflict: 'member_id,event_id' });
 
     if (error) {
@@ -349,8 +356,15 @@ export async function markAttendance(churchSlug: string, eventId: string, member
       return { error: `Database error: ${error.message}` };
     }
 
-    // 3. Update the attendance count using the RPC which is multi-tenant safe
-    await supabase.schema('church').rpc('increment_event_attendance', { event_id: eventId });
+    // 3. Update the attendance count intelligently
+    const wasPresent = existingLog?.attendance_status === 'present' || existingLog?.attendance_status === 'late';
+    const isPresent = status === 'present' || status === 'late';
+
+    if (!wasPresent && isPresent) {
+      await supabase.schema('church').rpc('increment_event_attendance', { event_id: eventId });
+    } else if (wasPresent && !isPresent) {
+      await supabase.schema('church').rpc('decrement_event_attendance', { event_id: eventId });
+    }
 
     revalidatePath(`/${churchSlug}/usher/dashboard`);
     revalidatePath(`/${churchSlug}/admin/attendance`);

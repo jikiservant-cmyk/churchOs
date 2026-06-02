@@ -20,15 +20,19 @@ export default async function AdminDashboard({
   const supabase = await createClient();
 
   // Optimized Parallel Data Fetching
-  const [userResult, memberCountResult, recentMembersResult, eventsResult, prayersResult, demographicsResult, convertsResult, donationsResult] = await Promise.all([
+  const [userResult, memberCountResult, recentMembersResult, eventsResult, prayersResult, demographicsResult, convertsResult, donationsResult, lastMonthMembersResult, recentAttendanceResult, memberGrowthResult, allLogsResult] = await Promise.all([
     supabase.auth.getUser(),
     supabase.schema('church').from('members').select('id', { count: 'exact', head: true }).eq('church_id', church.id),
     supabase.schema('church').from('members').select('full_name, created_at').eq('church_id', church.id).order('created_at', { ascending: false }).limit(5),
-    supabase.schema('church').from('events').select('*').eq('church_id', church.id).order('event_date', { ascending: false }).limit(5),
+    supabase.schema('church').from('events').select('*').eq('church_id', church.id).order('event_date', { ascending: false }).limit(10),
     supabase.schema('church').from('prayers').select('*').eq('church_id', church.id).order('created_at', { ascending: false }).limit(5),
     supabase.schema('church').from('members').select('gender, is_youth').eq('church_id', church.id),
     supabase.schema('church').from('new_converts').select('created_at').eq('church_id', church.id).gte('created_at', new Date(new Date().setMonth(new Date().getMonth() - 5)).toISOString()),
-    supabase.schema('church').from('donations').select('amount_cents, created_at').eq('church_id', church.id).gte('created_at', new Date(new Date().setMonth(new Date().getMonth() - 5)).toISOString())
+    supabase.schema('church').from('donations').select('amount_cents, created_at').eq('church_id', church.id).gte('created_at', new Date(new Date().setMonth(new Date().getMonth() - 5)).toISOString()),
+    supabase.schema('church').from('members').select('id', { count: 'exact', head: true }).eq('church_id', church.id).gte('created_at', new Date(new Date().setMonth(new Date().getMonth() - 1)).toISOString()),
+    supabase.schema('church').from('attendance_logs').select('member_id', { count: 'exact', head: true }).eq('church_id', church.id).in('attendance_status', ['present', 'late']).gte('check_in_time', new Date(new Date().setDate(new Date().getDate() - 30)).toISOString()),
+    supabase.schema('church').from('members').select('created_at').eq('church_id', church.id).gte('created_at', new Date(new Date().setMonth(new Date().getMonth() - 5)).toISOString()),
+    supabase.schema('church').from('attendance_logs').select('event_id, attendance_status').eq('church_id', church.id).in('attendance_status', ['present', 'late'])
   ]);
 
   const { data: { user } } = userResult;
@@ -44,6 +48,10 @@ export default async function AdminDashboard({
   const { data: membersDemographics } = demographicsResult;
   const { data: recentConverts } = convertsResult;
   const { data: recentDonations } = donationsResult;
+  const { count: lastMonthMemberCount } = lastMonthMembersResult;
+  const { count: activeAttendeeCount } = recentAttendanceResult;
+  const { data: memberGrowthData } = memberGrowthResult;
+  const { data: allAttendanceLogs } = allLogsResult;
 
   const realMemberCount = memberCount || 0;
   const mappedMembers = recentMembers?.map(m => ({
@@ -113,6 +121,27 @@ export default async function AdminDashboard({
   }
   const convertsData = Object.keys(convertsByMonth).map(month => ({ month, count: convertsByMonth[month] }));
 
+  // Aggregate members by month (last 6 months)
+  const membersByMonth: Record<string, number> = {};
+  for (let i = 5; i >= 0; i--) {
+    const d = new Date();
+    d.setDate(1);
+    d.setMonth(d.getMonth() - i);
+    const monthName = monthNames[d.getMonth()];
+    membersByMonth[monthName] = 0;
+  }
+
+  if (memberGrowthData) {
+    memberGrowthData.forEach((m: any) => {
+      const d = new Date(m.created_at);
+      const monthName = monthNames[d.getMonth()];
+      if (membersByMonth[monthName] !== undefined) {
+        membersByMonth[monthName]++;
+      }
+    });
+  }
+  const growthData = Object.keys(membersByMonth).map(month => ({ month, count: membersByMonth[month] }));
+
   if (recentDonations) {
     recentDonations.forEach(d => {
       const dateStr = new Date(d.created_at);
@@ -124,18 +153,32 @@ export default async function AdminDashboard({
   }
   const donationsData = Object.keys(donationsByMonth).map(month => ({ month, amount: donationsByMonth[month] }));
 
-  // Attendance History
-  const attendanceData = events.slice(0, 10).reverse().map(e => ({
-    name: e.event_date.split('-').slice(1).join('/'), // short date
-    count: e.attending_count || 0
-  }));
+  // Attendance History - Calculate counts from logs for 100% accuracy
+  const attendanceData = [...events].reverse().map(e => {
+    const eventLogs = allAttendanceLogs?.filter((log: any) => log.event_id === e.id) || [];
+    return {
+      name: new Date(e.event_date).toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' }),
+      count: eventLogs.length
+    };
+  });
   
-  const totalAttended = events.slice(0, 4).reduce((acc, curr) => acc + (curr.attending_count || 0), 0);
-  const avgAttendance = events.length > 0 ? Math.round(totalAttended / Math.min(events.length, 4)) : 0;
+  const completedEvents = events.filter(e => e.status === 'completed' || e.status === 'active');
+  const totalAttended = completedEvents.slice(0, 4).reduce((acc, curr) => {
+    const eventLogs = allAttendanceLogs?.filter((log: any) => log.event_id === curr.id) || [];
+    return acc + eventLogs.length;
+  }, 0);
+  const avgAttendance = completedEvents.length > 0 ? Math.round(totalAttended / Math.min(completedEvents.length, 4)) : 0;
+
+  // New Analytics calculations
+  const retentionRate = realMemberCount > 0 ? Math.round(((activeAttendeeCount || 0) / realMemberCount) * 100) : 0;
+  const growthRate = lastMonthMemberCount || 0;
+  const newConvertsCount = recentConverts?.length || 0;
 
   const topStats = [
-    { label: "Total Members", value: realMemberCount.toLocaleString(), note: "Active directory" },
-    { label: "Avg Attendance", value: avgAttendance.toLocaleString(), note: "Last 4 recent services" },
+    { label: "Total Members", value: realMemberCount.toLocaleString(), note: `${growthRate > 0 ? `+${growthRate}` : '0'} new this month` },
+    { label: "New Converts", value: newConvertsCount.toLocaleString(), note: "Last 6 months total" },
+    { label: "Avg Attendance", value: avgAttendance.toLocaleString(), note: "Based on last 4 services" },
+    { label: "Retention Rate", value: `${retentionRate}%`, note: "Active in last 30 days" },
   ];
 
   return (
@@ -144,7 +187,7 @@ export default async function AdminDashboard({
       <DashboardGreeting pastorName={pastorName} />
 
       {/* Stats Grid */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         {topStats.map((s, i) => (
           <div key={i} className="bg-[#F0E6D3] border border-[rgba(90,55,20,0.13)] rounded-2xl p-6 transition-all hover:translate-y-[-2px] hover:shadow-lg">
             <p className="text-[10px] font-bold text-[#C8B89A] uppercase tracking-widest mb-3">
@@ -160,7 +203,7 @@ export default async function AdminDashboard({
 
       {/* Charts Row */}
       <div className="overflow-hidden">
-        <AdminCharts genderData={genderData} youthData={youthData} convertsData={convertsData} donationsData={donationsData} attendanceData={attendanceData} />
+        <AdminCharts genderData={genderData} youthData={youthData} convertsData={convertsData} donationsData={donationsData} attendanceData={attendanceData} growthData={growthData} />
       </div>
 
       {/* Events Row (Now full width since Small Groups is removed) */}

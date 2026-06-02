@@ -22,13 +22,15 @@ export function AdminCharts({
   youthData,
   convertsData,
   donationsData,
-  attendanceData
+  attendanceData,
+  growthData
 }: { 
   genderData: { name: string, value: number, color: string }[],
   youthData?: { name: string, value: number, color: string }[],
   convertsData: { month: string, count: number }[],
   donationsData?: { month: string, amount: number }[],
-  attendanceData?: { name: string, count: number }[]
+  attendanceData?: { name: string, count: number }[],
+  growthData?: { month: string, count: number }[]
 }) {
   const [mounted, setMounted] = useState(false);
 
@@ -54,29 +56,35 @@ export function AdminCharts({
       {/* Attendance History */}
       {attendanceData && (
         <div className="bg-[#F0E6D3] border border-[rgba(90,55,20,0.13)] rounded-2xl p-6 shadow-sm flex flex-col">
-          <h4 style={{ fontFamily: "'Playfair Display', serif" }} className="text-lg font-bold text-[#1E1208] mb-4">General Attendance</h4>
+          <h4 style={{ fontFamily: "'Playfair Display', serif" }} className="text-lg font-bold text-[#1E1208] mb-4">General Attendance History</h4>
           <div className="flex-1 w-full" style={{ minWidth: 0, minHeight: 300 }}>
-            {attendanceData.every(d => d.count === 0) ? (
-              <div className="h-[300px] flex items-center justify-center text-[13px] text-[#9A7E65]">No attendance data available.</div>
+            {attendanceData.length === 0 ? (
+              <div className="h-[300px] flex items-center justify-center text-[13px] text-[#9A7E65]">No services recorded yet.</div>
             ) : (
               <ResponsiveContainer width="100%" height={300}>
-                <LineChart data={attendanceData} margin={{ top: 10, right: 30, left: 10, bottom: 0 }}>
+                <BarChart data={attendanceData} margin={{ top: 10, right: 30, left: 10, bottom: 0 }}>
                   <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#9A7E65', fontWeight: 'bold' }} />
-                  <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#9A7E65', fontWeight: 'bold' }} />
+                  <YAxis 
+                    axisLine={false} 
+                    tickLine={false} 
+                    tick={{ fontSize: 12, fill: '#9A7E65', fontWeight: 'bold' }} 
+                    domain={[0, 'auto']}
+                    allowDecimals={false}
+                  />
                   <BarTooltip 
                     cursor={{ fill: 'rgba(90,55,20,0.05)' }}
                     contentStyle={{ backgroundColor: '#F0E6D3', border: '1px solid rgba(90,55,20,0.13)', borderRadius: '8px', fontSize: '13px', fontWeight: 'bold' }}
                     formatter={(value: any) => [`${(Number(value) || 0).toLocaleString()} people`, 'Attended']}
                   />
-                  <Line type="monotone" dataKey="count" stroke="#B5622A" strokeWidth={3} dot={{ r: 4, fill: '#B5622A' }} name="Attendance" />
-                </LineChart>
+                  <Bar dataKey="count" fill="#B5622A" radius={[4, 4, 0, 0]} maxBarSize={50} name="Attendance" />
+                </BarChart>
               </ResponsiveContainer>
             )}
           </div>
         </div>
       )}
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
         {/* Gender Distribution */}
         <div className="bg-[#F0E6D3] border border-[rgba(90,55,20,0.13)] rounded-2xl p-6 shadow-sm flex flex-col">
           <h4 style={{ fontFamily: "'Playfair Display', serif" }} className="text-lg font-bold text-[#1E1208] mb-4">Gender</h4>
@@ -137,7 +145,10 @@ export function AdminCharts({
             </div>
           </div>
         )}
+      </div>
 
+      {/* Growth Trends */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
         {/* New Converts Statistics */}
         <div className="bg-[#F0E6D3] border border-[rgba(90,55,20,0.13)] rounded-2xl p-6 shadow-sm flex flex-col">
           <h4 style={{ fontFamily: "'Playfair Display', serif" }} className="text-lg font-bold text-[#1E1208] mb-4">New Converts (Last 6 Months)</h4>
@@ -159,6 +170,30 @@ export function AdminCharts({
             )}
           </div>
         </div>
+
+        {/* Member Growth Statistics */}
+        {growthData && (
+          <div className="bg-[#F0E6D3] border border-[rgba(90,55,20,0.13)] rounded-2xl p-6 shadow-sm flex flex-col">
+            <h4 style={{ fontFamily: "'Playfair Display', serif" }} className="text-lg font-bold text-[#1E1208] mb-4">Member Growth (Last 6 Months)</h4>
+            <div className="flex-1 w-full" style={{ minWidth: 0, minHeight: 250 }}>
+              {growthData.every(d => d.count === 0) ? (
+                <div className="h-[250px] flex items-center justify-center text-[13px] text-[#9A7E65]">No new members over this period.</div>
+              ) : (
+                <ResponsiveContainer width="100%" height={250}>
+                  <LineChart data={growthData} margin={{ top: 10, right: 30, left: 10, bottom: 0 }}>
+                    <XAxis dataKey="month" axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#9A7E65', fontWeight: 'bold' }} />
+                    <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#9A7E65', fontWeight: 'bold' }} />
+                    <BarTooltip 
+                      cursor={{ fill: 'rgba(90,55,20,0.05)' }}
+                      contentStyle={{ backgroundColor: '#F0E6D3', border: '1px solid rgba(90,55,20,0.13)', borderRadius: '8px', fontSize: '13px', fontWeight: 'bold' }}
+                    />
+                    <Line type="monotone" dataKey="count" stroke="#2B1A0E" strokeWidth={3} dot={{ r: 4, fill: '#2B1A0E' }} name="New Members" />
+                  </LineChart>
+                </ResponsiveContainer>
+              )}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Donations Bar Chart */}
