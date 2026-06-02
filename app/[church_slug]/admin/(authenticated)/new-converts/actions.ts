@@ -32,11 +32,12 @@ export async function addNewConvert(formData: FormData) {
 
     let formattedPhone = contact.trim();
     if (formattedPhone) {
-      try {
-        formattedPhone = normalizeUgPhone(formattedPhone);
-      } catch (err: any) {
-        console.error(err);
+      const normalized = normalizeUgPhone(formattedPhone);
+      if (!normalized) {
+        searchParams = new URLSearchParams({ error: 'Invalid phone number format. Please enter a valid Ugandan number.' }).toString();
+        redirect(`/${churchSlug}/admin/new-converts?${searchParams}`);
       }
+      formattedPhone = normalized!;
 
       let hasConflict = false;
 
@@ -155,9 +156,9 @@ export async function bulkAddNewConverts(churchSlug: string, convertsData: any[]
        if (formattedPhone) {
          formattedPhone = String(formattedPhone).trim();
          try {
-           formattedPhone = normalizeUgPhone(formattedPhone) || formattedPhone;
+           formattedPhone = normalizeUgPhone(formattedPhone) ?? formattedPhone;
          } catch(e) {
-           // ignore
+           // keep original if something unexpected throws
          }
        }
 
