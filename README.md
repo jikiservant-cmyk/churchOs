@@ -1,82 +1,84 @@
-# churchOs — LivePay STK Push Fix
+# churchOs Webhook Fix — v3 (final)
 
-## What's in this zip
+## What changed from v2
 
-| File | Action |
-|------|--------|
-| `app/api/payments/collect/route.ts` | **NEW FILE** — drop this directly into your repo at that exact path |
-| `GivingPortal.patch.ts` | **SNIPPET** — copy the `handleGive` function into your existing `GivingPortal.tsx` |
+v2 introduced a `recoverZombieTransactions()` function inside the webhook route.
+It was removed entirely in v3 for three reasons:
+
+1. **It fired in the wrong place.** Recovery only triggered when `tx == null` (transaction
+   not found). But the real zombie scenario has `tx` still present — so recovery never
+   actually ran on the stuck transactions it was meant to fix.
+
+2. **Double-credit risk.** The recovery had no way to prove whether the wallet had already
+   been credited. It only checked `wallet_transactions.status === 'pending'`, but that's
+   true in two completely different states: wallet credited (status update failed) and
+   wallet never credited. Running `increment_wallet_balance` again in the first case would
+   add money a second time with no guard to stop it.
+
+3. **Fire-and-forget in serverless.** The recovery ran without `await`. On Vercel/serverless
+   environments the process terminates immediately after the response is sent — the recovery
+   task would silently die before finishing.
+
+## The actual fix
+
+All three steps (billing_events insert → wallet credit → mark success) now happen inside
+a single Postgres transaction via the `process_topup_webhook` RPC. Either all succeed or
+all roll back. No intermediate state can exist. No recovery logic needed anywhere.
 
 ---
 
-## Step 1 — Drop in the new API route
-
-Copy the folder structure as-is into your project root:
+## Files
 
 ```
-your-project/
-└── app/
-    └── api/
-        └── payments/
-            └── collect/
-                └── route.ts   ← this file
+app/
+  api/
+    billing/
+      topup/
+        route.ts        ← Drop into your Next.js project at this path
+middleware.ts           ← Drop at the root of your Next.js project
+sql/
+  process_topup_webhook.sql  ← Run this in Supabase SQL editor FIRST
 ```
 
-This creates the `/api/payments/collect` endpoint that your GivingPortal will call.
-
 ---
 
-## Step 2 — Update GivingPortal.tsx
+## Deployment steps
 
-Open `components/GivingPortal.tsx` and find your existing payment/submit handler.
-Replace it with (or merge in) the `handleGive` function from `GivingPortal.patch.ts`.
+### 1. Run the SQL first
+Open Supabase → Database → SQL Editor → New query.
+Paste the contents of `sql/process_topup_webhook.sql` and run it.
+This creates the `process_topup_webhook` function that `route.ts` calls.
 
-Key things it does:
-- Calls `POST /api/payments/collect` (your new route)
-- Sends `phoneNumber`, `amount` (as a number), and `description`
-- Handles loading state, error state, and success state
+### 2. Drop in the TypeScript files
+Copy `route.ts` to `app/api/billing/topup/route.ts` in your project.
+Copy `middleware.ts` to the root of your Next.js project.
 
----
-
-## Step 3 — Fill in .env.local
-
-Make sure these two values are set in your `.env.local` (not empty strings):
-
-```env
-LIVEPAY_API_KEY="your_actual_livepay_api_key"
-LIVEPAY_ACCOUNT_NO="your_livepay_account_number"   # e.g. LP2305443309
+### 3. Check your env vars
+Make sure one of these is set in your deployment environment:
+```
+LIVEPAY_WEBHOOK_SECRET=your_secret_here
+```
+or
+```
+WEBHOOK_SECRET=your_secret_here
 ```
 
-> ⚠️ The variable name is `LIVEPAY_ACCOUNT_NO` — not `LIVEPAY_ACCOUNT_NUMBER`.
-> The route.ts uses this exact name, matching your .env.example.
-
----
-
-## Why it was broken
-
-1. **No payment API route existed** — `GivingPortal.tsx` had no server endpoint to call.
-   LivePay requests must go server-side so your API key is never exposed to the browser.
-
-2. **Wrong env var name** — The LivePay docs use `accountNumber` as the JSON field name,
-   but your project's env key is `LIVEPAY_ACCOUNT_NO`. The fix reads from the right key.
-
-3. **Amount type** — LivePay requires `amount` to be a number (`5000`), not a string (`"5000"`).
-   The route explicitly casts it with `Number(amount)`.
-
----
-
-## Testing
-
-Once deployed, trigger a payment and check your server logs. A successful STK push returns:
-
-```json
-{
-  "success": true,
-  "message": "Payment request sent",
-  "reference": "CH...",
-  "internal_reference": "...",
-  "network": "MTN"
-}
+### 4. Verify your LivePay dashboard
+Confirm the webhook URL registered there exactly matches your deployed route:
+```
+https://yourdomain.com/api/billing/topup
 ```
 
-If you get a `403`, double-check that `LIVEPAY_ACCOUNT_NO` matches the account tied to your API key.
+---
+
+## All bugs fixed (cumulative from v1)
+
+| # | Bug | Severity |
+|---|-----|----------|
+| 1 | Missing `p_app_type: 'church'` — wallets never credited | 🔴 Critical |
+| 2 | 200 returned on wallet failure — LivePay never retried | 🔴 Critical |
+| 3 | `billing_events` inserted before wallet credit — retries permanently blocked | 🔴 Critical |
+| 4 | Signature bypass — missing header skipped HMAC check entirely | 🔴 Critical |
+| 5 | Relworx `customer_reference` field not checked | 🟡 Medium |
+| 6 | Middleware running session refresh on every webhook request | 🟡 Medium |
+| 7 | Race condition between billing_events insert / wallet credit / status update | 🟠 Architecture |
