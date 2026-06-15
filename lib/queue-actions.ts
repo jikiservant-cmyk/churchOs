@@ -181,7 +181,7 @@ export async function processQueueBatch(
 
   // ── Pre-fetch wallet balances (one query per tenant in this batch) ─────────
   // FIX: explicitly type as string[] so TypeScript knows tid is a string index key
-  const tenantIds: string[] = [...new Set(claimed.map((r: any) => r.tenant_id as string))];
+  const tenantIds: string[] = [...new Set<string>(claimed.map((r: any) => r.tenant_id as string))];
   const balanceMap: Record<string, { balance: number; sms_rate: number }> = {};
 
   for (const tid of tenantIds) {
