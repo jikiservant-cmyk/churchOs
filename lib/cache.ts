@@ -1,43 +1,50 @@
 // lib/cache.ts
-// Redis caching layer using Upstash (serverless Redis).
+// Redis caching layer using Upstash REST API (no npm package required).
 //
 // Setup:
 //   1. Create a free Redis database at https://upstash.com
 //   2. Add UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN to your .env.local
-//   3. npm install @upstash/redis
 //
 // If the env vars are not set, all cache operations silently no-op —
 // the app still works, just without caching.
 
-import { Redis } from '@upstash/redis';
-
-let _redis: Redis | null = null;
-
-function getRedis(): Redis | null {
-  if (!process.env.UPSTASH_REDIS_REST_URL || !process.env.UPSTASH_REDIS_REST_TOKEN) {
-    return null;
-  }
-  if (!_redis) {
-    _redis = new Redis({
-      url: process.env.UPSTASH_REDIS_REST_URL,
-      token: process.env.UPSTASH_REDIS_REST_TOKEN,
-    });
-  }
-  return _redis;
+function getConfig() {
+  const url   = process.env.UPSTASH_REDIS_REST_URL;
+  const token = process.env.UPSTASH_REDIS_REST_TOKEN;
+  if (!url || !token) return null;
+  return { url, token };
 }
 
-// Default TTL: 60 seconds. Short enough to stay fresh, long enough to absorb bursts.
+async function redisCommand(args: (string | number)[]): Promise<unknown> {
+  const config = getConfig();
+  if (!config) return null;
+
+  const res = await fetch(`${config.url}`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${config.token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(args),
+  });
+
+  const json = await res.json();
+  if (json.error) throw new Error(json.error);
+  return json.result;
+}
+
+// Default TTL: 60 seconds.
 const DEFAULT_TTL_SECONDS = 60;
 
 /**
  * Get a cached value by key. Returns null on cache miss or if Redis is not configured.
  */
 export async function getCached<T>(key: string): Promise<T | null> {
-  const redis = getRedis();
-  if (!redis) return null;
+  if (!getConfig()) return null;
   try {
-    const data = await redis.get<T>(key);
-    return data ?? null;
+    const result = await redisCommand(['GET', key]);
+    if (result === null || result === undefined) return null;
+    return (typeof result === 'string' ? JSON.parse(result) : result) as T;
   } catch (err) {
     console.warn('[cache] GET failed:', key, err);
     return null;
@@ -52,10 +59,9 @@ export async function setCached<T>(
   value: T,
   ttlSeconds: number = DEFAULT_TTL_SECONDS
 ): Promise<void> {
-  const redis = getRedis();
-  if (!redis) return;
+  if (!getConfig()) return;
   try {
-    await redis.set(key, value, { ex: ttlSeconds });
+    await redisCommand(['SET', key, JSON.stringify(value), 'EX', ttlSeconds]);
   } catch (err) {
     console.warn('[cache] SET failed:', key, err);
   }
@@ -63,21 +69,18 @@ export async function setCached<T>(
 
 /**
  * Delete one or more keys from the cache.
- * Call this after any write operation to keep data fresh.
  */
 export async function invalidateCache(...keys: string[]): Promise<void> {
-  const redis = getRedis();
-  if (!redis || keys.length === 0) return;
+  if (!getConfig() || keys.length === 0) return;
   try {
-    await redis.del(...keys);
+    await redisCommand(['DEL', ...keys]);
   } catch (err) {
     console.warn('[cache] DEL failed:', keys, err);
   }
 }
 
 // ---------------------------------------------------------------------------
-// Cache key factories — keeps key names consistent across the codebase.
-// Always use these instead of hardcoding strings.
+// Cache key factories
 // ---------------------------------------------------------------------------
 export const cacheKeys = {
   members:        (churchId: string, page = 0) => `members:${churchId}:p${page}`,
@@ -92,7 +95,6 @@ export const cacheKeys = {
 
 /**
  * Invalidate all cached data for a church in one call.
- * Use this after bulk writes (e.g. CSV import, bulk SMS).
  */
 export async function invalidateChurch(churchId: string): Promise<void> {
   await invalidateCache(
