@@ -1,6 +1,7 @@
 import { getChurchBySlug } from '@/lib/db';
 import { createClient } from '@/lib/supabase/server';
 import { redirect, notFound } from 'next/navigation';
+import Link from 'next/link';
 import AdminSidebar from '@/components/AdminSidebar';
 
 export default async function AdminLayout({ 
@@ -53,7 +54,7 @@ export default async function AdminLayout({
             <div className="bg-[#F0E6D3] p-8 rounded-3xl border border-[#B5622A]/20 shadow-xl max-w-md">
                <h2 className="text-2xl font-bold text-[#1E1208] mb-4">Church Mismatch</h2>
                <p className="text-[#9A7E65]">You are not authorized to manage this church portal. Please contact support if this is an error.</p>
-               <a href="/" className="inline-block mt-6 px-6 py-2 bg-[#2B1A0E] text-[#F5E6CE] rounded-xl font-bold uppercase tracking-widest text-xs">Return Home</a>
+               <Link href="/" className="inline-block mt-6 px-6 py-2 bg-[#2B1A0E] text-[#F5E6CE] rounded-xl font-bold uppercase tracking-widest text-xs">Return Home</Link>
             </div>
          </div>
        );

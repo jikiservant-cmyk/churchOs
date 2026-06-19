@@ -37,7 +37,7 @@ export function SendMissedMessagesButton({ eventId, churchId, churchSlug }: { ev
           className="flex items-center gap-2 bg-[#B5622A] text-white px-8 py-4 rounded-2xl font-bold text-[14px] uppercase tracking-widest hover:bg-[#944F22] transition-all shadow-lg active:scale-95"
         >
           <MessageSquare className="w-5 h-5" />
-          Compose "Missed You" SMS
+          Compose &quot;Missed You&quot; SMS
         </button>
       ) : (
         <div className="w-full bg-[#F0E6D3] p-6 rounded-2xl border border-[rgba(90,55,20,0.13)] shadow-sm animate-in zoom-in-95 duration-200">

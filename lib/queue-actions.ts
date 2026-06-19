@@ -143,7 +143,7 @@ export async function enqueueBroadcast(
 
 // ─────────────────────────────────────────────────────────────────────────────
 // processQueueBatch
-// ─────────────────────────────────────────────────────────────────────────────
+// ─��───────────────────────────────────────────────────────────────────────────
 
 export interface ProcessQueueOptions {
   /** Restrict processing to a single church. Omit to process all pending. */
@@ -326,7 +326,7 @@ export async function getBroadcastStatus(
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Internal helpers
-// ─────────────────────────────────────────────────────────────────────────────
+// ──────────────────────────────────────────────────────���──────────────────────
 
 async function _syncBroadcastCounts(admin: any, broadcastId: string) {
   const { data: rows } = await admin

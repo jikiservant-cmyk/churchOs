@@ -91,7 +91,7 @@ export async function initiateLivePayPayment(formData: FormData) {
     if (result.internal_reference) {
       await supabase
         .from('wallet_transactions')
-        .update({ idempotency_key: result.internal_reference })
+        .update({ reference_id: result.internal_reference })
         .eq('reference_code', referenceCode);
     }
 
@@ -183,7 +183,7 @@ export async function initiateDonationPayment(params: {
     if (result.internal_reference) {
       await supabase
         .from('wallet_transactions')
-        .update({ idempotency_key: result.internal_reference })
+        .update({ reference_id: result.internal_reference })
         .eq('reference_code', referenceCode);
     }
 
@@ -269,7 +269,7 @@ export async function initiateRelworxPayment(formData: FormData) {
     // 3. Update transaction with Relworx internal reference
     await supabase
       .from('wallet_transactions')
-      .update({ idempotency_key: result.internal_reference })
+      .update({ reference_id: result.internal_reference })
       .eq('reference_code', referenceCode);
 
     return { success: true, message: 'Payment prompt sent to your phone!' };
