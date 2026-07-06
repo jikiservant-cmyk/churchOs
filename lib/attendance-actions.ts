@@ -7,11 +7,13 @@ import { ChurchEvent, AttendanceLog, AttendanceFlag, AttendanceFlagStatus } from
 import { SignJWT, jwtVerify } from 'jose';
 import { sendSingleSMS } from './sms-actions';
 
-const jwtSecretValue = process.env.USHER_JWT_SECRET || process.env.SUPABASE_SERVICE_ROLE_KEY;
-if (!jwtSecretValue) {
-  throw new Error('USHER_JWT_SECRET (or SUPABASE_SERVICE_ROLE_KEY) environment variable is not set. Cannot sign usher sessions.');
+function getJwtSecret(): Uint8Array {
+  const jwtSecretValue = process.env.USHER_JWT_SECRET || process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!jwtSecretValue) {
+    throw new Error('USHER_JWT_SECRET (or SUPABASE_SERVICE_ROLE_KEY) environment variable is not set. Cannot sign usher sessions.');
+  }
+  return new TextEncoder().encode(jwtSecretValue);
 }
-const JWT_SECRET = new TextEncoder().encode(jwtSecretValue);
 
 export async function validateUsherPasskey(churchSlug: string, passkey: string) {
   try {
@@ -50,7 +52,7 @@ export async function validateUsherPasskey(churchSlug: string, passkey: string) 
       .setProtectedHeader({ alg: 'HS256' })
       .setIssuedAt()
       .setExpirationTime('24h')
-      .sign(JWT_SECRET);
+      .sign(getJwtSecret());
 
     const cookieStore = await cookies();
     const cookieName = `usher_session_${churchSlug.toLowerCase()}`;
@@ -83,7 +85,7 @@ export async function getUsherSession(churchSlug: string) {
   if (!token) return null;
   
   try {
-    const { payload } = await jwtVerify(token, JWT_SECRET);
+    const { payload } = await jwtVerify(token, getJwtSecret());
     return payload as any;
   } catch (e) {
     console.error('Usher session verification failed:', e);

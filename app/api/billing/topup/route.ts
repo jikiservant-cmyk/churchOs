@@ -3,6 +3,9 @@ import { createClient } from '@supabase/supabase-js';
 import { revalidatePath } from 'next/cache';
 import crypto from 'crypto';
 
+// Prevent Next.js from caching this route
+export const dynamic = 'force-dynamic';
+
 /** Service-role client — webhook has no user session/cookies, needs to bypass RLS */
 function getServiceDb() {
   return createClient(
@@ -11,35 +14,36 @@ function getServiceDb() {
   );
 }
 
-/**
- * POST /api/billing/topup
- *
- * LivePay webhook — fires after the admin approves or declines
- * the Mobile Money prompt on their phone.
- *
- * On success: credits wallet via increment_wallet_balance RPC,
- *             marks transaction 'success', revalidates cache.
- */
 export async function POST(request: Request) {
   // ── 1. Read raw body before parsing (required for HMAC check) ────────────
   const rawBody = await request.text();
 
-  // ── 2. Verify LivePay webhook signature ───────────────────────────────────
+  // ── 2. Verify webhook signature ───────────────────────────────────────────
   const secret = process.env.LIVEPAY_WEBHOOK_SECRET ?? process.env.WEBHOOK_SECRET;
+
   const incomingSig =
     request.headers.get('x-livepay-signature') ??
     request.headers.get('x-webhook-signature') ??
     '';
 
-  if (secret && incomingSig) {
+  if (secret) {
+    // Missing signature header = immediate reject
+    if (!incomingSig) {
+      console.error('[topup webhook] Missing signature header — rejected');
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    }
+
     const expected = crypto
       .createHmac('sha256', secret)
       .update(rawBody)
       .digest('hex');
 
+    // Strip "sha256=" prefix that some providers include
+    const normalizedSig = incomingSig.replace(/^sha256=/, '');
+
     if (
-      expected.length !== incomingSig.length ||
-      !crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(incomingSig))
+      expected.length !== normalizedSig.length ||
+      !crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(normalizedSig))
     ) {
       console.error('[topup webhook] Invalid signature — rejected');
       return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
@@ -54,12 +58,13 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
   }
 
-  // Support common LivePay field name variants
+  // Supports LivePay and Relworx reference field names
   const reference = (
     payload.reference ??
     payload.ref ??
     payload.internal_reference ??
-    payload.transaction_ref
+    payload.transaction_ref ??
+    payload.customer_reference // Relworx
   ) as string;
 
   const rawStatus = (
@@ -104,53 +109,51 @@ export async function POST(request: Request) {
   }
 
   if (!tx) {
-    // Already processed (idempotent) or unknown — always 200
     console.log(`[topup webhook] Reference ${reference} not found or already processed.`);
     return NextResponse.json({ received: true });
   }
 
-  // ── 6. Idempotency guard via billing_events unique constraint ─────────────
-  const { error: eventError } = await db.from('billing_events').insert({
-    event_type: 'topup',
-    payload: payload,
-    idempotency_key: reference,
-    reference_id: reference,
-    tenant_id: tx.tenant_id,
+  // ── 6. Process atomically via single DB transaction ───────────────────────
+  //
+  // process_topup_webhook does all three steps inside one Postgres transaction:
+  //   a) INSERT billing_events (idempotency guard via unique constraint)
+  //   b) increment_wallet_balance (p_app_type: 'church')
+  //   c) UPDATE wallet_transactions.status = 'success'
+  //
+  // Either all three succeed or all three roll back. No zombie state is possible.
+  // If the server crashes after this RPC returns successfully but before we send
+  // the HTTP response, LivePay retries → the RPC sees the duplicate billing_events
+  // row → returns 'duplicate' → we respond 200. Safe.
+  const { data: result, error: rpcError } = await db.rpc('process_topup_webhook', {
+    p_reference:  reference,
+    p_tenant_id:  tx.tenant_id,
+    p_amount:     tx.amount,
+    p_payload:    payload,
   });
 
-  if (eventError?.code === '23505') {
-    // Duplicate webhook — already processed
-    console.log(`[topup webhook] Duplicate for ${reference}, skipping.`);
-    return NextResponse.json({ received: true });
-  }
-  if (eventError) {
-    console.error('[topup webhook] billing_events error:', eventError);
-    return NextResponse.json({ error: 'DB error' }, { status: 500 });
+  if (rpcError) {
+    console.error('[topup webhook] process_topup_webhook RPC failed:', rpcError);
+    return NextResponse.json({ error: 'Payment processing failed, please retry' }, { status: 500 });
   }
 
-  // ── 7. Credit wallet atomically via RPC ───────────────────────────────────
-  const { error: walletError } = await db.rpc('increment_wallet_balance', {
-    p_tenant_id: tx.tenant_id,
-    p_amount: tx.amount,
-  });
+  switch (result?.result) {
+    case 'credited':
+      revalidatePath('/', 'layout');
+      console.log(
+        `[topup webhook] ✅ Wallet credited — tenant: ${tx.tenant_id}, amount: UGX ${tx.amount}, ref: ${reference}`
+      );
+      return NextResponse.json({ received: true });
 
-  if (walletError) {
-    console.error('[topup webhook] increment_wallet_balance failed:', walletError);
-    return NextResponse.json({ received: true });
+    case 'duplicate':
+      console.log(`[topup webhook] Duplicate for ${reference}, skipping.`);
+      return NextResponse.json({ received: true });
+
+    case 'not_found':
+      console.log(`[topup webhook] Reference ${reference} not found inside RPC.`);
+      return NextResponse.json({ received: true });
+
+    default:
+      console.error('[topup webhook] Unexpected RPC result:', result);
+      return NextResponse.json({ error: 'Unexpected error' }, { status: 500 });
   }
-
-  // ── 8. Mark transaction success ───────────────────────────────────────────
-  await db
-    .from('wallet_transactions')
-    .update({ status: 'success', provider_payload: payload })
-    .eq('reference_code', reference);
-
-  // ── 9. Revalidate cache so wallet balance refreshes on next page load ─────
-  revalidatePath('/', 'layout');
-
-  console.log(
-    `[topup webhook] ✅ Wallet credited — tenant: ${tx.tenant_id}, amount: UGX ${tx.amount}, ref: ${reference}`
-  );
-
-  return NextResponse.json({ received: true });
 }
