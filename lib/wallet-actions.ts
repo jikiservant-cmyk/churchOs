@@ -4,34 +4,45 @@ import { createClient, createAdminClient } from '@/lib/supabase/server';
 import { revalidatePath } from 'next/cache';
 import { normalizeUgPhone } from './utils';
 
-// Helper to format phone for LivePay (expects 07... or 2567...)
+// Helper to format phone for LivePay (expects 0... e.g. 0777123456)
 function formatPhoneForLivePay(phone: string): string {
   const normalized = normalizeUgPhone(phone);
-  if (!normalized) return phone; // Fallback to raw if normalization fails
-  return normalized.replace('+', ''); // Convert +2567... to 2567...
+  if (!normalized) return phone;
+  // Convert +256777123456 to 0777123456 as requested by common LivePay implementations
+  if (normalized.startsWith('+256')) {
+    return '0' + normalized.slice(4);
+  }
+  return normalized.replace('+', ''); 
 }
 
 export async function initiateLivePayPayment(formData: FormData) {
   try {
     const churchId = formData.get('churchId') as string;
-    const amount = parseInt(formData.get('amount') as string, 10) || 5000;
+    const amountStr = formData.get('amount') as string;
+    const amount = parseInt(amountStr, 10);
     const phoneNumber = formData.get('phoneNumber') as string;
 
-    if (!churchId || !phoneNumber) {
-      return { error: 'Missing required fields' };
+    console.log('[LivePay] Initiation started:', { churchId, amount, phoneNumber });
+
+    if (!churchId || !phoneNumber || isNaN(amount)) {
+      console.error('[LivePay] Missing or invalid fields:', { churchId, phoneNumber, amount });
+      return { error: 'Missing or invalid required fields' };
     }
 
     const apiKey = process.env.LIVEPAY_API_KEY;
     const accountNo = process.env.LIVEPAY_ACCOUNT_NO;
 
     if (!apiKey || !accountNo) {
-      console.error('[LivePay] API credentials missing from environment');
+      console.error('[LivePay] API credentials missing from environment. API_KEY:', !!apiKey, 'ACCOUNT_NO:', !!accountNo);
       return { error: 'Payment service not configured' };
     }
 
     // 1. Create a pending transaction in our DB first
     const supabase = await createAdminClient();
-    const referenceCode = `LP_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+    // Reference should be unique, no spaces, max 30 chars. Using a cleaner format.
+    const referenceCode = `CH${Date.now().toString().slice(-8)}${Math.random().toString(36).substring(7).toUpperCase()}`;
+
+    console.log('[LivePay] Creating transaction record with ref:', referenceCode);
 
     const { error: txError } = await supabase.from('wallet_transactions').insert({
       tenant_id: churchId,
@@ -48,22 +59,22 @@ export async function initiateLivePayPayment(formData: FormData) {
     if (txError) {
       console.error('[LivePay] Failed to create pending transaction:', txError);
       return {
-        error: `Database error: ${txError.message} (${txError.code})`,
-        details: txError,
+        error: `Database error: ${txError.message}`,
       };
     }
 
     // 2. Call LivePay API
+    const formattedPhone = formatPhoneForLivePay(phoneNumber);
     const requestBody = {
       accountNumber: accountNo,
-      phoneNumber: formatPhoneForLivePay(phoneNumber),
+      phoneNumber: formattedPhone,
       amount: amount,
       currency: 'UGX',
       reference: referenceCode,
       description: 'ChurchOS Wallet Top-up',
     };
 
-    console.log('[LivePay] Sending request to collect-money:', JSON.stringify({ ...requestBody, accountNumber: 'LP***' }));
+    console.log('[LivePay] Sending request to collect-money:', JSON.stringify({ ...requestBody, accountNumber: 'REDACTED' }));
 
     const response = await fetch('https://livepay.me/api/collect-money', {
       method: 'POST',
@@ -74,31 +85,46 @@ export async function initiateLivePayPayment(formData: FormData) {
       body: JSON.stringify(requestBody),
     });
 
-    const result = await response.json();
+    let result;
+    const responseText = await response.text();
+    try {
+      result = JSON.parse(responseText);
+    } catch (e) {
+      console.error('[LivePay] Failed to parse JSON response. Raw response:', responseText);
+      result = { message: 'Invalid response from payment provider' };
+    }
+    
     console.log('[LivePay] API Response:', JSON.stringify(result));
 
     if (!response.ok) {
-      console.error('[LivePay] API Error:', result);
+      console.error('[LivePay] API Error Response:', result);
+      // Mark as failed in DB
       await supabase
         .from('wallet_transactions')
-        .update({ status: 'failed' })
+        .update({ 
+          status: 'failed', 
+          provider_payload: { ...result, raw_response: responseText.slice(0, 500) } 
+        })
         .eq('reference_code', referenceCode);
 
       return { error: result.error || result.message || 'Payment request failed' };
     }
 
     // 3. Update transaction with LivePay internal reference if available
-    if (result.internal_reference) {
+    if (result.internal_reference || result.reference) {
       await supabase
         .from('wallet_transactions')
-        .update({ idempotency_key: result.internal_reference })
+        .update({ 
+          idempotency_key: result.internal_reference || result.reference,
+          provider_payload: result 
+        })
         .eq('reference_code', referenceCode);
     }
 
     return { success: true, message: 'Payment prompt sent to your phone!' };
   } catch (err: any) {
-    console.error('[LivePay] Unexpected error:', err);
-    return { error: 'An unexpected error occurred' };
+    console.error('[LivePay] Unexpected error during initiation:', err);
+    return { error: 'An unexpected error occurred: ' + (err.message || 'Unknown error') };
   }
 }
 

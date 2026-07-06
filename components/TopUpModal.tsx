@@ -42,17 +42,25 @@ export default function TopUpModal({ churchId, isOpen, onClose }: TopUpModalProp
     
     const finalAmount = customAmount ? parseInt(customAmount, 10) : parseInt(amount, 10);
     
-    if (finalAmount < 2000) {
-      toast.error('Minimum top up amount is 2,000 UGX');
+    if (isNaN(finalAmount) || finalAmount < 2000) {
+      toast.error('Please enter a valid amount (minimum 2,000 UGX)');
+      return;
+    }
+
+    if (!phone || phone.length < 10) {
+      toast.error('Please enter a valid phone number');
       return;
     }
 
     setIsSubmitting(true);
 
-    const formData = new FormData(e.currentTarget);
-    formData.set('amount', finalAmount.toString());
-
     try {
+      // Use the existing formData but ensure amount is set correctly
+      const formData = new FormData(e.currentTarget);
+      formData.set('amount', finalAmount.toString());
+      
+      console.log('Submitting top-up for amount:', finalAmount, 'phone:', phone);
+
       const result = await initiateLivePayPayment(formData);
       if (result?.success) {
         setIsSuccess(true);
