@@ -1,12 +1,12 @@
-import { createClient } from "@/lib/supabase/server";
+import { createClient } from '@/lib/supabase/server';
 import {
   History,
   AlertCircle,
-} from "lucide-react";
-import BroadcastComposer from "@/components/BroadcastComposer";
-import { getChurchBySlug } from "@/lib/db";
-import BroadcastHistory from "@/components/BroadcastHistory";
-import SMSWalletWidget from "@/components/SMSWalletWidget";
+} from 'lucide-react';
+import BroadcastComposer from '@/components/BroadcastComposer';
+import { getChurchBySlug } from '@/lib/db';
+import BroadcastHistory from '@/components/BroadcastHistory';
+import SMSWalletWidget from '@/components/SMSWalletWidget';
 
 export default async function MessagesPage(props: {
   params: Promise<{ church_slug: string }>;

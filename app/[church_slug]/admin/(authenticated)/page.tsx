@@ -13,7 +13,7 @@ export default async function AdminDashboard({
     id: 'unknown',
     name: resolvedParams.church_slug,
     slug: resolvedParams.church_slug,
-    themeColor: 'bg-slate-900',
+    themeColor: 'bg-slate-90',
     logoUrl: `https://picsum.photos/seed/${resolvedParams.church_slug}/200/200`
   };
 

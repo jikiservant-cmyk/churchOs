@@ -15,6 +15,132 @@ function formatPhoneForLivePay(phone: string): string {
   return normalized.replace('+', ''); 
 }
 
+// Helper to format phone for Najiki (accepts 07... or 256...)
+function formatPhoneForNajiki(phone: string): string {
+  // Najiki accepts both formats, let's just pass it through
+  // But ensure no special chars
+  const cleaned = phone.replace(/\D/g, '');
+  if (cleaned.startsWith('0')) return cleaned;
+  if (cleaned.startsWith('256')) return `0${cleaned.slice(3)}`;
+  return phone;
+}
+
+// Najiki Payment Initiation
+export async function initiateNajikiPayment(formData: FormData) {
+  try {
+    const churchId = formData.get('churchId') as string;
+    const amountStr = formData.get('amount') as string;
+    const amount = parseInt(amountStr, 10);
+    const phoneNumber = formData.get('phoneNumber') as string;
+
+    console.log('[Najiki] Initiation started:', { churchId, amount, phoneNumber });
+
+    if (!churchId || !phoneNumber || isNaN(amount)) {
+      console.error('[Najiki] Missing or invalid fields:', { churchId, phoneNumber, amount });
+      return { error: 'Missing or invalid required fields' };
+    }
+
+    const apiKey = process.env.NAJIKI_API_KEY;
+    const applicationCode = process.env.NAJIKI_APPLICATION_CODE;
+    const tenantCode = process.env.NAJIKI_TENANT_CODE;
+
+    if (!apiKey || !applicationCode) {
+      console.error('[Najiki] API credentials missing from environment. API_KEY:', !!apiKey, 'APPLICATION_CODE:', !!applicationCode);
+      return { error: 'Payment service not configured' };
+    }
+
+    // 1. Create a pending transaction in our DB first
+    const supabase = await createAdminClient();
+    const idempotencyKey = `IDEMP-${Date.now().toString().slice(-8)}-${Math.random().toString(36).substring(7).toUpperCase()}`;
+
+    const { error: txError } = await supabase.from('wallet_transactions').insert({
+      tenant_id: churchId,
+      amount: amount,
+      type: 'TOPUP',
+      description: `Najiki Top-up for ${phoneNumber}`,
+      reference_code: idempotencyKey,
+      status: 'pending',
+      product: 'sms',
+      revenue_ugx: 0,
+      created_by: 'system',
+    });
+
+    if (txError) {
+      console.error('[Najiki] Failed to create pending transaction:', txError);
+      return {
+        error: `Database error: ${txError.message}`
+      }
+    }
+
+    // 2. Call Najiki API
+    const formattedPhone = formatPhoneForNajiki(phoneNumber);
+    const requestBody = {
+      applicationCode,
+      ...(tenantCode ? { tenantCode } : {}),
+      paymentTypeCode: 'sms_credits',
+      externalEntityId: churchId,
+      amount: amount,
+      currency: 'UGX',
+      phoneNumber: formattedPhone,
+      idempotencyKey: idempotencyKey,
+      metadata: { churchId, source: 'admin-dashboard' }
+    };
+
+    console.log('[Najiki] Sending request to /api/payments:', JSON.stringify({ ...requestBody, phoneNumber: 'REDACTED' }));
+
+    const response = await fetch('https://najiki.netlify.app/api/payments', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(requestBody),
+    });
+
+    let result;
+    const responseText = await response.text();
+    try {
+      result = JSON.parse(responseText);
+    } catch (e) {
+      console.error('[Najiki] Failed to parse JSON response. Raw response:', responseText);
+      result = { message: 'Invalid response from payment provider' };
+    }
+
+    console.log('[Najiki] API Response:', JSON.stringify(result));
+
+    if (!response.ok) {
+      console.error('[Najiki] API Error Response:', result);
+      // Mark as failed in DB
+      await supabase
+        .from('wallet_transactions')
+        .update({ 
+          status: 'failed', 
+          provider_payload: { ...result, raw_response: responseText.slice(0, 500) } 
+        })
+        .eq('reference_code', idempotencyKey);
+
+      return { error: result.error || result.message || 'Payment request failed' };
+    }
+
+    // 3. Update transaction with Najiki paymentId
+    if (result.paymentId) {
+      await supabase
+        .from('wallet_transactions')
+        .update({ 
+          idempotency_key: result.paymentId,
+          reference_id: result.reference,
+          provider_payload: result 
+        })
+        .eq('reference_code', idempotencyKey);
+    }
+
+    return { success: true, message: 'Payment prompt sent to your phone!', paymentId: result.paymentId, reference: result.reference };
+  } catch (err: any) {
+    console.error('[Najiki] Unexpected error during initiation:', err);
+    return { error: 'An unexpected error occurred: ' + (err.message || 'Unknown error') };
+  }
+}
+
 export async function initiateLivePayPayment(formData: FormData) {
   try {
     const churchId = formData.get('churchId') as string;

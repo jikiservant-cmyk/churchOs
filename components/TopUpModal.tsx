@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { X, Smartphone, CreditCard, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
-import { initiateLivePayPayment } from '@/lib/wallet-actions';
+import { initiateNajikiPayment } from '@/lib/wallet-actions';
 import { toast } from 'sonner';
 
 interface TopUpModalProps {
@@ -61,7 +61,7 @@ export default function TopUpModal({ churchId, isOpen, onClose }: TopUpModalProp
       
       console.log('Submitting top-up for amount:', finalAmount, 'phone:', phone);
 
-      const result = await initiateLivePayPayment(formData);
+      const result = await initiateNajikiPayment(formData);
       if (result?.success) {
         setIsSuccess(true);
         toast.success(result.message || 'Payment prompt sent!');
@@ -102,7 +102,7 @@ export default function TopUpModal({ churchId, isOpen, onClose }: TopUpModalProp
             Wallet Top Up
           </h2>
           <p className="text-[13px] text-[#9A7E65] mt-1 font-medium">
-            Add SMS credits via LivePay Mobile Money
+            Add SMS credits via Najiki Mobile Money
           </p>
         </div>
 
