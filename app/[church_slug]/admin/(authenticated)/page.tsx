@@ -1,5 +1,5 @@
 import { getChurchBySlug } from '@/lib/db';
-import { createClient } from '@/lib/supabase/server';
+import { createAdminClient } from '@/lib/supabase/server';
 import { AdminCharts } from '@/components/AdminCharts';
 import DashboardGreeting from '@/components/DashboardGreeting';
 
@@ -17,7 +17,7 @@ export default async function AdminDashboard({
     logoUrl: `https://picsum.photos/seed/${resolvedParams.church_slug}/200/200`
   };
 
-  const supabase = await createClient();
+  const supabase = await createAdminClient();
 
   // Optimized Parallel Data Fetching
   const [userResult, memberCountResult, recentMembersResult, eventsResult, prayersResult, demographicsResult, convertsResult, donationsResult, lastMonthMembersResult, recentAttendanceResult, memberGrowthResult, allLogsResult] = await Promise.all([

@@ -1,5 +1,5 @@
 import { Metadata } from 'next';
-import { createClient } from '@/lib/supabase/server';
+import { createAdminClient } from '@/lib/supabase/server';
 import { redirect, notFound } from 'next/navigation';
 import { revalidatePath } from 'next/cache';
 import { Plus, Calendar, Clock, MapPin, CheckCircle2, ChevronRight, Activity, AlertCircle } from 'lucide-react';
@@ -23,7 +23,7 @@ export default async function AttendancePage(props: {
 }) {
   const resolvedParams = await props.params;
   const { church_slug } = resolvedParams;
-  const supabase = await createClient();
+  const supabase = await createAdminClient();
 
   // Get Admin Profile to verify access
   const { data: { user } } = await supabase.auth.getUser();

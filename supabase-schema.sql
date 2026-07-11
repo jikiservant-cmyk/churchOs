@@ -150,6 +150,9 @@ END $$;
 
 -- RPC: Atomic Provisioning Function
 -- This prevents race conditions and ensures data integrity across schemas
+-- First drop any existing versions to avoid "could not choose best candidate" errors
+DROP FUNCTION IF EXISTS public.provision_church_v2(uuid, text, text, text);
+DROP FUNCTION IF EXISTS public.provision_church_v2(text, text, text, uuid);
 CREATE OR REPLACE FUNCTION public.provision_church_v2(
   p_user_id uuid,
   p_name text,
@@ -162,15 +165,14 @@ SECURITY DEFINER
 SET search_path = public, church, auth
 AS $$
 DECLARE
-  v_tenant_id uuid;
+  v_tenant_uuid uuid;
   v_user_email text;
+  v_role public.admin_role_enum;
 BEGIN
-  -- 1. Identity Check
   IF p_user_id IS NULL THEN
     RAISE EXCEPTION 'User ID is required';
   END IF;
 
-  -- 2. Namespace Check: Unique slug (churches.slug)
   IF EXISTS (
     SELECT 1
     FROM church.churches
@@ -179,43 +181,63 @@ BEGIN
     RAISE EXCEPTION 'Workspace URL (slug) is already taken';
   END IF;
 
-  -- 3. Identity Resolution (email)
-  v_user_email := auth.jwt() ->> 'email';
-  IF v_user_email IS NULL THEN
-    SELECT email INTO v_user_email
-    FROM auth.users
-    WHERE id = p_user_id;
-  END IF;
+  SELECT u.email INTO v_user_email
+  FROM auth.users u
+  WHERE u.id = p_user_id;
 
   IF v_user_email IS NULL THEN
     RAISE EXCEPTION 'User email not found. Please try logging in again.';
   END IF;
 
-  -- 4. Atomic Write Strategy
+  IF p_role IS NULL THEN
+    RAISE EXCEPTION 'Role is required';
+  END IF;
 
-  -- a) Create Tenant
-  -- Tenants table uses: id (PK), app_type, name, created_at
-  v_tenant_id := gen_random_uuid();
+  v_role := p_role::public.admin_role_enum;
+  v_tenant_uuid := gen_random_uuid();
 
-  INSERT INTO public.tenants (id, app_type, name)
-  VALUES (v_tenant_id, 'church', p_name);
+  INSERT INTO public.tenants (
+    id,
+    app_type,
+    name
+  )
+  VALUES (
+    v_tenant_uuid,
+    'church',
+    p_name
+  );
 
-  -- b) Create Church Link
-  -- church.churches uses: id, name, slug, app_type, ...
-  INSERT INTO church.churches (id, name, slug, app_type)
-  VALUES (v_tenant_id, p_name, p_slug, 'church');
+  INSERT INTO church.churches (
+    id,
+    name,
+    slug,
+    app_type
+  )
+  VALUES (
+    v_tenant_uuid,
+    p_name,
+    p_slug,
+    'church'
+  );
 
-  -- c) Create Admin Profile (Owner)
-  -- admin_profiles uses: id (FK to auth.users), tenant_id, role, app_type, email, full_name
-  INSERT INTO public.admin_profiles (id, tenant_id, email, app_type, role, full_name)
-  VALUES (p_user_id, v_tenant_id, v_user_email, 'church', p_role::admin_role_enum, p_name)
-  ON CONFLICT (id) DO UPDATE SET
-    tenant_id = EXCLUDED.tenant_id,
-    app_type = EXCLUDED.app_type,
-    role = EXCLUDED.role,
-    email = EXCLUDED.email;
+  INSERT INTO public.admin_profiles (
+    id,
+    email,
+    tenant_id,
+    role,
+    full_name,
+    app_type
+  )
+  VALUES (
+    p_user_id,
+    v_user_email,
+    v_tenant_uuid,
+    v_role,
+    p_name,
+    'church'
+  );
 
-  RETURN v_tenant_id;
+  RETURN v_tenant_uuid;
 END;
 $$;
 
@@ -268,14 +290,10 @@ ALTER TABLE church.churches ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS "Admins can view their associated church" ON church.churches;
 CREATE POLICY "Admins can manage their associated church" 
-ON church.churches FOR ALL 
-TO authenticated 
-USING (
-  id IN (
-    SELECT tenant_id FROM public.admin_profiles 
-    WHERE id = auth.uid()
-  )
-);
+  ON church.churches FOR ALL 
+  TO authenticated 
+  USING (id = church.my_tenant_id())
+  WITH CHECK (id = church.my_tenant_id());
 
 CREATE POLICY "Service role full access on churches" 
 ON church.churches FOR ALL 
@@ -380,6 +398,19 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
+-- Create church.my_tenant_id() helper function FIRST (before policies use it)
+CREATE OR REPLACE FUNCTION church.my_tenant_id()
+RETURNS uuid AS $$
+BEGIN
+  RETURN (
+    SELECT tenant_id::uuid 
+    FROM public.admin_profiles 
+    WHERE id = auth.uid()
+    LIMIT 1
+  );
+END;
+$$ LANGUAGE plpgsql STABLE SECURITY DEFINER;
+
 -- 8. Consolidated RLS Policies for Other Tables
 ALTER TABLE church.sms_logs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.wallets ENABLE ROW LEVEL SECURITY;
@@ -393,72 +424,186 @@ ALTER TABLE church.small_groups ENABLE ROW LEVEL SECURITY;
 ALTER TABLE church.donations ENABLE ROW LEVEL SECURITY;
 
 -- SMS Logs Policies
-CREATE POLICY "Pastors can manage their church sms logs"
-  ON church.sms_logs FOR ALL
+DROP POLICY IF EXISTS "Pastors can manage their church sms logs" ON church.sms_logs;
+DROP POLICY IF EXISTS "sms_logs_rw_select" ON church.sms_logs;
+DROP POLICY IF EXISTS "sms_logs_rw_update" ON church.sms_logs;
+DROP POLICY IF EXISTS "sms_logs_insert" ON church.sms_logs;
+DROP POLICY IF EXISTS "sms_logs_delete" ON church.sms_logs;
+CREATE POLICY "sms_logs_rw_select"
+  ON church.sms_logs FOR SELECT
   TO authenticated
-  USING (
-    tenant_id IN (
-      SELECT tenant_id FROM public.admin_profiles 
-      WHERE id = auth.uid() AND role = 'pastor'
-    )
-  );
+  USING (tenant_id = church.my_tenant_id());
+CREATE POLICY "sms_logs_rw_update"
+  ON church.sms_logs FOR UPDATE
+  TO authenticated
+  USING (tenant_id = church.my_tenant_id())
+  WITH CHECK (tenant_id = church.my_tenant_id());
+CREATE POLICY "sms_logs_insert"
+  ON church.sms_logs FOR INSERT
+  TO authenticated
+  WITH CHECK (tenant_id = church.my_tenant_id());
+CREATE POLICY "sms_logs_delete"
+  ON church.sms_logs FOR DELETE
+  TO authenticated
+  USING (tenant_id = church.my_tenant_id());
 
 -- Wallets Policies
+DROP POLICY IF EXISTS "Pastors can view their church wallet" ON public.wallets;
 CREATE POLICY "Pastors can view their church wallet"
   ON public.wallets FOR SELECT
   TO authenticated
-  USING (
-    tenant_id IN (
-      SELECT tenant_id FROM public.admin_profiles 
-      WHERE id = auth.uid()
-    )
-  );
+  USING (tenant_id = church.my_tenant_id());
 
 -- Transactions Policies
+DROP POLICY IF EXISTS "Pastors can view their church transactions" ON public.wallet_transactions;
 CREATE POLICY "Pastors can view their church transactions"
   ON public.wallet_transactions FOR SELECT
   TO authenticated
-  USING (
-    tenant_id IN (
-      SELECT tenant_id FROM public.admin_profiles 
-      WHERE id = auth.uid()
-    )
-  );
+  USING (tenant_id = church.my_tenant_id());
 
--- Members Policies
-CREATE POLICY "Pastors can manage their members"
-  ON church.members FOR ALL
+-- Members Policies using church.my_tenant_id()
+DROP POLICY IF EXISTS "Pastors can manage their members" ON church.members;
+DROP POLICY IF EXISTS "members_rw_select" ON church.members;
+DROP POLICY IF EXISTS "members_rw_update" ON church.members;
+DROP POLICY IF EXISTS "members_insert" ON church.members;
+DROP POLICY IF EXISTS "members_delete" ON church.members;
+CREATE POLICY "members_rw_select"
+  ON church.members FOR SELECT
   TO authenticated
-  USING (
-    church_id IN (
-      SELECT tenant_id FROM public.admin_profiles 
-      WHERE id = auth.uid()
-    )
-  );
-
--- New Converts Policies
-CREATE POLICY "Pastors can manage their new converts"
-  ON church.new_converts FOR ALL
+  USING (church_id = church.my_tenant_id());
+CREATE POLICY "members_rw_update"
+  ON church.members FOR UPDATE
   TO authenticated
-  USING (
-    church_id IN (
-      SELECT tenant_id FROM public.admin_profiles 
-      WHERE id = auth.uid()
-    )
-  );
+  USING (church_id = church.my_tenant_id())
+  WITH CHECK (church_id = church.my_tenant_id());
+CREATE POLICY "members_insert"
+  ON church.members FOR INSERT
+  TO authenticated
+  WITH CHECK (church_id = church.my_tenant_id());
+CREATE POLICY "members_delete"
+  ON church.members FOR DELETE
+  TO authenticated
+  USING (church_id = church.my_tenant_id());
 
--- Dasboard Items Policies (Events, Prayers, Groups, Donations)
-CREATE POLICY "Pastors can manage their events" ON church.events FOR ALL TO authenticated
-  USING (church_id IN (SELECT tenant_id FROM public.admin_profiles WHERE id = auth.uid()));
+-- New Converts Policies using church.my_tenant_id()
+DROP POLICY IF EXISTS "Pastors can manage their new converts" ON church.new_converts;
+DROP POLICY IF EXISTS "new_converts_rw_select" ON church.new_converts;
+DROP POLICY IF EXISTS "new_converts_rw_update" ON church.new_converts;
+DROP POLICY IF EXISTS "new_converts_insert" ON church.new_converts;
+DROP POLICY IF EXISTS "new_converts_delete" ON church.new_converts;
+CREATE POLICY "new_converts_rw_select"
+  ON church.new_converts FOR SELECT
+  TO authenticated
+  USING (church_id = church.my_tenant_id());
+CREATE POLICY "new_converts_rw_update"
+  ON church.new_converts FOR UPDATE
+  TO authenticated
+  USING (church_id = church.my_tenant_id())
+  WITH CHECK (church_id = church.my_tenant_id());
+CREATE POLICY "new_converts_insert"
+  ON church.new_converts FOR INSERT
+  TO authenticated
+  WITH CHECK (church_id = church.my_tenant_id());
+CREATE POLICY "new_converts_delete"
+  ON church.new_converts FOR DELETE
+  TO authenticated
+  USING (church_id = church.my_tenant_id());
 
-CREATE POLICY "Pastors can manage their prayers" ON church.prayers FOR ALL TO authenticated
-  USING (church_id IN (SELECT tenant_id FROM public.admin_profiles WHERE id = auth.uid()));
+-- Events Policies using church.my_tenant_id()
+DROP POLICY IF EXISTS "Pastors can manage their events" ON church.events;
+DROP POLICY IF EXISTS "events_rw_select" ON church.events;
+DROP POLICY IF EXISTS "events_rw_update" ON church.events;
+DROP POLICY IF EXISTS "events_insert" ON church.events;
+DROP POLICY IF EXISTS "events_delete" ON church.events;
+CREATE POLICY "events_rw_select"
+  ON church.events FOR SELECT
+  TO authenticated
+  USING (church_id = church.my_tenant_id());
+CREATE POLICY "events_rw_update"
+  ON church.events FOR UPDATE
+  TO authenticated
+  USING (church_id = church.my_tenant_id())
+  WITH CHECK (church_id = church.my_tenant_id());
+CREATE POLICY "events_insert"
+  ON church.events FOR INSERT
+  TO authenticated
+  WITH CHECK (church_id = church.my_tenant_id());
+CREATE POLICY "events_delete"
+  ON church.events FOR DELETE
+  TO authenticated
+  USING (church_id = church.my_tenant_id());
 
-CREATE POLICY "Pastors can manage their small_groups" ON church.small_groups FOR ALL TO authenticated
-  USING (church_id IN (SELECT tenant_id FROM public.admin_profiles WHERE id = auth.uid()));
+-- Prayers Policies using church.my_tenant_id()
+DROP POLICY IF EXISTS "Pastors can manage their prayers" ON church.prayers;
+DROP POLICY IF EXISTS "prayers_rw_select" ON church.prayers;
+DROP POLICY IF EXISTS "prayers_rw_update" ON church.prayers;
+DROP POLICY IF EXISTS "prayers_insert" ON church.prayers;
+DROP POLICY IF EXISTS "prayers_delete" ON church.prayers;
+CREATE POLICY "prayers_rw_select"
+  ON church.prayers FOR SELECT
+  TO authenticated
+  USING (church_id = church.my_tenant_id());
+CREATE POLICY "prayers_rw_update"
+  ON church.prayers FOR UPDATE
+  TO authenticated
+  USING (church_id = church.my_tenant_id())
+  WITH CHECK (church_id = church.my_tenant_id());
+CREATE POLICY "prayers_insert"
+  ON church.prayers FOR INSERT
+  TO authenticated
+  WITH CHECK (church_id = church.my_tenant_id());
+CREATE POLICY "prayers_delete"
+  ON church.prayers FOR DELETE
+  TO authenticated
+  USING (church_id = church.my_tenant_id());
 
-CREATE POLICY "Pastors can manage their donations" ON church.donations FOR ALL TO authenticated
-  USING (church_id IN (SELECT tenant_id FROM public.admin_profiles WHERE id = auth.uid()));
+-- Small Groups Policies using church.my_tenant_id()
+DROP POLICY IF EXISTS "Pastors can manage their small_groups" ON church.small_groups;
+DROP POLICY IF EXISTS "small_groups_rw_select" ON church.small_groups;
+DROP POLICY IF EXISTS "small_groups_rw_update" ON church.small_groups;
+DROP POLICY IF EXISTS "small_groups_insert" ON church.small_groups;
+DROP POLICY IF EXISTS "small_groups_delete" ON church.small_groups;
+CREATE POLICY "small_groups_rw_select"
+  ON church.small_groups FOR SELECT
+  TO authenticated
+  USING (church_id = church.my_tenant_id());
+CREATE POLICY "small_groups_rw_update"
+  ON church.small_groups FOR UPDATE
+  TO authenticated
+  USING (church_id = church.my_tenant_id())
+  WITH CHECK (church_id = church.my_tenant_id());
+CREATE POLICY "small_groups_insert"
+  ON church.small_groups FOR INSERT
+  TO authenticated
+  WITH CHECK (church_id = church.my_tenant_id());
+CREATE POLICY "small_groups_delete"
+  ON church.small_groups FOR DELETE
+  TO authenticated
+  USING (church_id = church.my_tenant_id());
+
+-- Donations Policies using church.my_tenant_id()
+DROP POLICY IF EXISTS "Pastors can manage their donations" ON church.donations;
+DROP POLICY IF EXISTS "donations_rw_select" ON church.donations;
+DROP POLICY IF EXISTS "donations_rw_update" ON church.donations;
+DROP POLICY IF EXISTS "donations_insert" ON church.donations;
+DROP POLICY IF EXISTS "donations_delete" ON church.donations;
+CREATE POLICY "donations_rw_select"
+  ON church.donations FOR SELECT
+  TO authenticated
+  USING (church_id = church.my_tenant_id());
+CREATE POLICY "donations_rw_update"
+  ON church.donations FOR UPDATE
+  TO authenticated
+  USING (church_id = church.my_tenant_id())
+  WITH CHECK (church_id = church.my_tenant_id());
+CREATE POLICY "donations_insert"
+  ON church.donations FOR INSERT
+  TO authenticated
+  WITH CHECK (church_id = church.my_tenant_id());
+CREATE POLICY "donations_delete"
+  ON church.donations FOR DELETE
+  TO authenticated
+  USING (church_id = church.my_tenant_id());
 
 -- Service Role Bypass for all
 CREATE POLICY "Service role bypass on sms_logs" ON church.sms_logs TO service_role USING (true);
@@ -616,12 +761,52 @@ CREATE POLICY "Churches are viewable by everyone"
   TO public 
   USING (true);
 
--- Additional RLS Policies
-CREATE POLICY "Pastors can manage their attendance logs" ON church.attendance_logs FOR ALL TO authenticated
-  USING (event_id IN (SELECT id FROM church.events WHERE church_id IN (SELECT tenant_id FROM public.admin_profiles WHERE id = auth.uid())));
+-- Additional RLS Policies (using church.my_tenant_id())
+DROP POLICY IF EXISTS "Pastors can manage their attendance logs" ON church.attendance_logs;
+DROP POLICY IF EXISTS "attendance_logs_rw_select" ON church.attendance_logs;
+DROP POLICY IF EXISTS "attendance_logs_rw_update" ON church.attendance_logs;
+DROP POLICY IF EXISTS "attendance_logs_insert" ON church.attendance_logs;
+DROP POLICY IF EXISTS "attendance_logs_delete" ON church.attendance_logs;
+CREATE POLICY "attendance_logs_rw_select"
+  ON church.attendance_logs FOR SELECT
+  TO authenticated
+  USING (church_id = church.my_tenant_id());
+CREATE POLICY "attendance_logs_rw_update"
+  ON church.attendance_logs FOR UPDATE
+  TO authenticated
+  USING (church_id = church.my_tenant_id())
+  WITH CHECK (church_id = church.my_tenant_id());
+CREATE POLICY "attendance_logs_insert"
+  ON church.attendance_logs FOR INSERT
+  TO authenticated
+  WITH CHECK (church_id = church.my_tenant_id());
+CREATE POLICY "attendance_logs_delete"
+  ON church.attendance_logs FOR DELETE
+  TO authenticated
+  USING (church_id = church.my_tenant_id());
 
-CREATE POLICY "Pastors can manage their attendance flags" ON church.attendance_flags FOR ALL TO authenticated
-  USING (church_id IN (SELECT tenant_id FROM public.admin_profiles WHERE id = auth.uid()));
+DROP POLICY IF EXISTS "Pastors can manage their attendance flags" ON church.attendance_flags;
+DROP POLICY IF EXISTS "attendance_flags_rw_select" ON church.attendance_flags;
+DROP POLICY IF EXISTS "attendance_flags_rw_update" ON church.attendance_flags;
+DROP POLICY IF EXISTS "attendance_flags_insert" ON church.attendance_flags;
+DROP POLICY IF EXISTS "attendance_flags_delete" ON church.attendance_flags;
+CREATE POLICY "attendance_flags_rw_select"
+  ON church.attendance_flags FOR SELECT
+  TO authenticated
+  USING (church_id = church.my_tenant_id());
+CREATE POLICY "attendance_flags_rw_update"
+  ON church.attendance_flags FOR UPDATE
+  TO authenticated
+  USING (church_id = church.my_tenant_id())
+  WITH CHECK (church_id = church.my_tenant_id());
+CREATE POLICY "attendance_flags_insert"
+  ON church.attendance_flags FOR INSERT
+  TO authenticated
+  WITH CHECK (church_id = church.my_tenant_id());
+CREATE POLICY "attendance_flags_delete"
+  ON church.attendance_flags FOR DELETE
+  TO authenticated
+  USING (church_id = church.my_tenant_id());
 
 CREATE POLICY "Service role bypass on attendance_logs" ON church.attendance_logs TO service_role USING (true);
 CREATE POLICY "Service role bypass on attendance_flags" ON church.attendance_flags TO service_role USING (true);

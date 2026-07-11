@@ -1,4 +1,4 @@
-import { createClient } from '@/lib/supabase/server';
+import { createAdminClient } from '@/lib/supabase/server';
 import { Users, Plus, MoreVertical, Pencil } from 'lucide-react';
 import { addMember, bulkAddMembers } from './actions';
 import CSVUploader from '@/components/CSVUploader';
@@ -14,15 +14,18 @@ export default async function MembersPage(props: {
 }) {
   const resolvedParams = await props.params;
   const searchParams = await props.searchParams;
-  const supabase = await createClient();
+  const supabase = await createAdminClient(); // Use admin client to bypass RLS for server components
 
   // Fetch church details first to get the ID for filtering
-  const { data: church } = await supabase
+  const { data: church, error: churchError } = await supabase
     .schema('church')
     .from('churches')
     .select('id')
     .eq('slug', resolvedParams.church_slug)
     .maybeSingle();
+
+  console.log('[Members Page] Slug from URL:', resolvedParams.church_slug);
+  console.log('[Members Page] Church Data:', church, 'Church Error:', churchError);
 
   // Fetch members. 
   let query = supabase
@@ -38,6 +41,8 @@ export default async function MembersPage(props: {
   const { data: members, error } = await query
     .order('created_at', { ascending: false })
     .limit(200);
+
+  console.log('[Members Page] Members Data:', members, 'Members Error:', error);
 
   return (
     <div className="max-w-7xl mx-auto space-y-6">

@@ -1,4 +1,4 @@
-import { createClient } from '@/lib/supabase/server';
+import { createAdminClient } from '@/lib/supabase/server';
 import { UserPlus, Plus, MoreVertical, Pencil } from 'lucide-react';
 import { addNewConvert, bulkAddNewConverts } from './actions';
 import CSVUploader from '@/components/CSVUploader';
@@ -15,7 +15,7 @@ export default async function NewConvertsPage(props: {
   const resolvedParams = await props.params;
   const searchParams = await props.searchParams;
   const Object_slug = resolvedParams.church_slug;
-  const supabase = await createClient();
+  const supabase = await createAdminClient();
 
   const { data: church } = await supabase
     .schema('church')
