@@ -7,6 +7,7 @@ import Link from 'next/link';
 import { Suspense } from 'react';
 
 import PaginatedConvertsList from '@/components/PaginatedConvertsList';
+import SubmitButton from '@/components/SubmitButton';
 
 export default async function NewConvertsPage(props: {
   params: Promise<{ church_slug: string }>;
@@ -108,12 +109,12 @@ export default async function NewConvertsPage(props: {
               />
             </div>
 
-            <button 
-              type="submit"
+            <SubmitButton
               className="w-full py-3 bg-slate-900 text-white rounded-xl text-sm font-bold hover:bg-slate-800 transition-colors mt-4 shadow-[0_4px_16px_-4px_rgba(0,0,0,0.1)]"
+              pendingText="Saving..."
             >
               Save Details
-            </button>
+            </SubmitButton>
           </form>
         </div>
       </div>

@@ -4,7 +4,7 @@ import { useState } from 'react';
 import Link from 'next/link';
 import Image from 'next/image';
 import { usePathname } from 'next/navigation';
-import { LayoutDashboard, Users, UserPlus, MessageSquare, ClipboardList, Settings, LogOut, Menu, X } from 'lucide-react';
+import { LayoutDashboard, Users, UserPlus, MessageSquare, ClipboardList, Settings, LogOut, Menu, X, UserCheck } from 'lucide-react';
 import type { Church } from '@/lib/db';
 
 export default function AdminSidebar({ church, churchSlug }: { church: Church, churchSlug: string }) {
@@ -16,6 +16,7 @@ export default function AdminSidebar({ church, churchSlug }: { church: Church, c
   const navLinks = [
     { href: `/${churchSlug}/admin`, icon: LayoutDashboard, label: 'Dashboard' },
     { href: `/${churchSlug}/admin/members`, icon: Users, label: 'Members' },
+    { href: `/${churchSlug}/admin/visitors`, icon: UserCheck, label: 'Visitors' },
     { href: `/${churchSlug}/admin/attendance`, icon: ClipboardList, label: 'Attendance' },
     { href: `/${churchSlug}/admin/new-converts`, icon: UserPlus, label: 'New Converts' },
     { href: `/${churchSlug}/admin/messages`, icon: MessageSquare, label: 'Messages' },

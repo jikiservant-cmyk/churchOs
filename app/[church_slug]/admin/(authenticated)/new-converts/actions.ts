@@ -30,65 +30,64 @@ export async function addNewConvert(formData: FormData) {
   try {
     const { supabase, churchId: finalChurchId } = await checkChurchAdminAuth(churchSlug);
 
-    let formattedPhone = contact.trim();
-    if (formattedPhone) {
-      const normalized = normalizeUgPhone(formattedPhone);
-      if (!normalized) {
-        searchParams = new URLSearchParams({ error: 'Invalid phone number format. Please enter a valid Ugandan number.' }).toString();
-        redirect(`/${churchSlug}/admin/new-converts?${searchParams}`);
-      }
-      formattedPhone = normalized!;
+    let finalContact = contact.trim();
+    let hasConflict = false;
 
-      let hasConflict = false;
-
-      // Check if phone number already exists in members
-      const { data: existingMember } = await supabase
-        .schema('church')
-        .from('members')
-        .select('id')
-        .eq('church_id', finalChurchId)
-        .eq('phone_number', formattedPhone)
-        .maybeSingle();
-
-      if (existingMember) {
-        hasConflict = true;
-        // Silently ignore
-      }
-
-      if (!hasConflict) {
-        // Check if phone number already exists in new_converts
-        const { data: existingConvert } = await supabase
+    // Try to normalize as phone for conflict checks, but if it's not a valid phone, just use the raw input
+    let normalizedPhone = null;
+    if (finalContact) {
+      normalizedPhone = normalizeUgPhone(finalContact);
+      
+      if (normalizedPhone) {
+        // Only check for conflicts if it's a valid phone number
+        // Check if phone number already exists in members
+        const { data: existingMember } = await supabase
           .schema('church')
-          .from('new_converts')
+          .from('members')
           .select('id')
           .eq('church_id', finalChurchId)
-          .eq('contact', formattedPhone)
+          .eq('phone_number', normalizedPhone)
           .maybeSingle();
-        
-        if (existingConvert) {
+
+        if (existingMember) {
           hasConflict = true;
-          // Silently ignore
+        }
+
+        if (!hasConflict) {
+          // Check if phone number already exists in new_converts
+          const { data: existingConvert } = await supabase
+            .schema('church')
+            .from('new_converts')
+            .select('id')
+            .eq('church_id', finalChurchId)
+            .eq('contact', normalizedPhone)
+            .maybeSingle();
+          
+          if (existingConvert) {
+            hasConflict = true;
+          }
         }
       }
+    }
 
-      if (!hasConflict) {
-        const payload = {
-          church_id: finalChurchId,
-          name: name.trim(),
-          contact: formattedPhone,
-        };
+    if (!hasConflict) {
+      // Save the raw contact input, not just normalized phone!
+      const payload = {
+        church_id: finalChurchId,
+        name: name.trim(),
+        contact: finalContact || null,
+      };
 
-        const { error } = await supabase
-          .schema('church')
-          .from('new_converts')
-          .insert(payload);
+      const { error } = await supabase
+        .schema('church')
+        .from('new_converts')
+        .insert(payload);
 
-        if (error) {
-          console.error('Error adding new convert:', error);
-          searchParams = new URLSearchParams({
-            error: `DB Insert Error: ${error.message}${error.details ? ` (${error.details})` : ''}`,
-          }).toString();
-        }
+      if (error) {
+        console.error('Error adding new convert:', error);
+        searchParams = new URLSearchParams({
+          error: `DB Insert Error: ${error.message}${error.details ? ` (${error.details})` : ''}`,
+        }).toString();
       }
     }
   } catch (err: any) {
@@ -152,20 +151,14 @@ export async function bulkAddNewConverts(churchSlug: string, convertsData: any[]
     const { supabase, churchId: finalChurchId } = await checkChurchAdminAuth(churchSlug);
 
     const payload = convertsData.map((convert) => {
-       let formattedPhone = convert.contact || convert.phone || convert.phone_number || '';
-       if (formattedPhone) {
-         formattedPhone = String(formattedPhone).trim();
-         try {
-           formattedPhone = normalizeUgPhone(formattedPhone) ?? formattedPhone;
-         } catch(e) {
-           // keep original if something unexpected throws
-         }
-       }
-
+       let rawContact = convert.contact || convert.phone || convert.phone_number || '';
+       let finalContact = rawContact.trim() || null;
+       
+       // No need to normalize for bulk insert, just save the raw contact
        return {
          church_id: finalChurchId,
          name: String(convert.name || convert.full_name || convert.fullName || 'Unknown').trim(),
-         contact: formattedPhone,
+         contact: finalContact,
        };
     });
 

@@ -20,7 +20,7 @@ export default async function AdminDashboard({
   const supabase = await createAdminClient();
 
   // Optimized Parallel Data Fetching
-  const [userResult, memberCountResult, recentMembersResult, eventsResult, prayersResult, demographicsResult, convertsResult, donationsResult, lastMonthMembersResult, recentAttendanceResult, memberGrowthResult, allLogsResult] = await Promise.all([
+  const [userResult, memberCountResult, recentMembersResult, eventsResult, prayersResult, demographicsResult, convertsResult, donationsResult, lastMonthMembersResult, recentAttendanceResult, memberGrowthResult, allLogsResult, visitorCountResult, lastMonthVisitorsResult, recentVisitorsResult] = await Promise.all([
     supabase.auth.getUser(),
     supabase.schema('church').from('members').select('id', { count: 'exact', head: true }).eq('church_id', church.id),
     supabase.schema('church').from('members').select('full_name, created_at').eq('church_id', church.id).order('created_at', { ascending: false }).limit(5),
@@ -32,7 +32,10 @@ export default async function AdminDashboard({
     supabase.schema('church').from('members').select('id', { count: 'exact', head: true }).eq('church_id', church.id).gte('created_at', new Date(new Date().setMonth(new Date().getMonth() - 1)).toISOString()),
     supabase.schema('church').from('attendance_logs').select('member_id', { count: 'exact', head: true }).eq('church_id', church.id).in('attendance_status', ['present', 'late']).gte('check_in_time', new Date(new Date().setDate(new Date().getDate() - 30)).toISOString()),
     supabase.schema('church').from('members').select('created_at').eq('church_id', church.id).gte('created_at', new Date(new Date().setMonth(new Date().getMonth() - 5)).toISOString()),
-    supabase.schema('church').from('attendance_logs').select('event_id, attendance_status').eq('church_id', church.id).in('attendance_status', ['present', 'late'])
+    supabase.schema('church').from('attendance_logs').select('event_id, attendance_status').eq('church_id', church.id).in('attendance_status', ['present', 'late']),
+    supabase.schema('church').from('visitors').select('id', { count: 'exact', head: true }).eq('church_id', church.id),
+    supabase.schema('church').from('visitors').select('id', { count: 'exact', head: true }).eq('church_id', church.id).gte('created_at', new Date(new Date().setMonth(new Date().getMonth() - 1)).toISOString()),
+    supabase.schema('church').from('visitors').select('full_name, created_at, visitor_type').eq('church_id', church.id).order('created_at', { ascending: false }).limit(5)
   ]);
 
   const { data: { user } } = userResult;
@@ -52,6 +55,9 @@ export default async function AdminDashboard({
   const { count: activeAttendeeCount } = recentAttendanceResult;
   const { data: memberGrowthData } = memberGrowthResult;
   const { data: allAttendanceLogs } = allLogsResult;
+  const { count: visitorCount } = visitorCountResult;
+  const { count: lastMonthVisitorCount } = lastMonthVisitorsResult;
+  const { data: recentVisitors } = recentVisitorsResult;
 
   const realMemberCount = memberCount || 0;
   const mappedMembers = recentMembers?.map(m => ({
@@ -174,11 +180,17 @@ export default async function AdminDashboard({
   const growthRate = lastMonthMemberCount || 0;
   const newConvertsCount = recentConverts?.length || 0;
 
+  const mappedVisitors = recentVisitors?.map(v => ({
+    name: v.full_name,
+    since: new Date(v.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+    type: v.visitor_type
+  })) || [];
+
   const topStats = [
     { label: "Total Members", value: realMemberCount.toLocaleString(), note: `${growthRate > 0 ? `+${growthRate}` : '0'} new this month` },
+    { label: "Total Visitors", value: (visitorCount || 0).toLocaleString(), note: `${(lastMonthVisitorCount || 0) > 0 ? `+${lastMonthVisitorCount}` : '0'} new this month` },
     { label: "New Converts", value: newConvertsCount.toLocaleString(), note: "Last 6 months total" },
     { label: "Avg Attendance", value: avgAttendance.toLocaleString(), note: "Based on last 4 services" },
-    { label: "Retention Rate", value: `${retentionRate}%`, note: "Active in last 30 days" },
   ];
 
   return (
@@ -238,10 +250,10 @@ export default async function AdminDashboard({
         </div>
       </div>
 
-      {/* Members + Prayer Row */}
+      {/* Members + Visitors + Prayer Row */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
         {/* New Members */}
-        <div className="lg:col-span-5 bg-[#F0E6D3] border border-[rgba(90,55,20,0.13)] rounded-2xl overflow-hidden shadow-sm">
+        <div className="lg:col-span-4 bg-[#F0E6D3] border border-[rgba(90,55,20,0.13)] rounded-2xl overflow-hidden shadow-sm">
           <div className="px-6 py-5 flex items-center justify-between">
             <h4 style={{ fontFamily: "'Playfair Display', serif" }} className="text-lg font-bold text-[#1E1208]">New Members</h4>
             <button className="text-[11px] font-bold text-[#9A7E65] hover:text-[#B5622A] transition-colors uppercase tracking-wider">View all</button>
@@ -266,8 +278,34 @@ export default async function AdminDashboard({
           </div>
         </div>
 
+        {/* Recent Visitors */}
+        <div className="lg:col-span-4 bg-[#F0E6D3] border border-[rgba(90,55,20,0.13)] rounded-2xl overflow-hidden shadow-sm">
+          <div className="px-6 py-5 flex items-center justify-between">
+            <h4 style={{ fontFamily: "'Playfair Display', serif" }} className="text-lg font-bold text-[#1E1208]">Recent Visitors</h4>
+            <button className="text-[11px] font-bold text-[#9A7E65] hover:text-[#B5622A] transition-colors uppercase tracking-wider">View all</button>
+          </div>
+          <div className="border-t border-[rgba(90,55,20,0.08)] divide-y divide-[rgba(90,55,20,0.08)]">
+            {mappedVisitors.length === 0 ? (
+              <div className="px-6 py-8 text-center">
+                <p className="text-[13px] text-[#9A7E65]">No recent visitors.</p>
+              </div>
+            ) : mappedVisitors.map((v, index) => (
+              <div key={index} className="px-6 py-4 flex items-center gap-3 hover:bg-[rgba(90,55,20,0.02)] transition-colors">
+                <div className="w-9 h-9 rounded-full bg-[rgba(181,98,42,0.12)] flex items-center justify-center text-[13px] font-bold text-[#B5622A] shrink-0">
+                  {v.name[0]}
+                </div>
+                <div className="flex-1 min-w-0">
+                   <p className="text-[14px] font-bold text-[#1E1208] truncate">{v.name}</p>
+                   <p className="text-[12px] text-[#9A7E65]">Visited {v.since}</p>
+                </div>
+                <span className="px-2 py-0.5 bg-[rgba(181,98,42,0.08)] text-[10px] font-bold text-[#B5622A] rounded-full uppercase tracking-wider shrink-0">{v.type.replace('_', ' ')}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
         {/* Prayer Wall */}
-        <div className="lg:col-span-7 bg-[#F0E6D3] border border-[rgba(90,55,20,0.13)] rounded-2xl overflow-hidden shadow-sm">
+        <div className="lg:col-span-4 bg-[#F0E6D3] border border-[rgba(90,55,20,0.13)] rounded-2xl overflow-hidden shadow-sm">
           <div className="px-6 py-5 flex items-center justify-between">
             <h4 style={{ fontFamily: "'Playfair Display', serif" }} className="text-lg font-bold text-[#1E1208]">Prayer Wall</h4>
             <button className="px-4 py-1.5 bg-[#2B1A0E] text-[#F5E6CE] text-[11px] font-bold rounded-lg hover:bg-[#3D2614] transition-colors uppercase tracking-widest">+ Add</button>

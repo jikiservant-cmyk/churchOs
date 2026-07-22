@@ -7,6 +7,7 @@ import Link from 'next/link';
 import { Suspense } from 'react';
 
 import PaginatedMembersList from '@/components/PaginatedMembersList';
+import SubmitButton from '@/components/SubmitButton';
 
 export default async function MembersPage(props: {
   params: Promise<{ church_slug: string }>;
@@ -149,12 +150,11 @@ export default async function MembersPage(props: {
               <label htmlFor="is_youth" className="text-sm font-bold text-[#9A7E65] cursor-pointer">Mark as Youth Member</label>
             </div>
 
-            <button 
-              type="submit"
+            <SubmitButton
               className="w-full py-3.5 bg-[#2B1A0E] text-[#F5E6CE] rounded-xl text-sm font-bold hover:bg-[#3D2614] shadow-md transition-all mt-4 tracking-widest uppercase"
             >
               Save Member
-            </button>
+            </SubmitButton>
           </form>
         </div>
       </div>

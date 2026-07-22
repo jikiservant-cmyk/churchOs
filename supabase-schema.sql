@@ -1282,3 +1282,419 @@ SELECT cron.schedule('refresh-inactive-30-days-daily','0 2 * * *','SELECT church
 
 -- Schedule daily follow-up processing (at 2:10 AM)
 SELECT cron.schedule('process-inactive-30-days-followups-daily','10 2 * * *','SELECT church.process_inactive_30_days_followups();');
+
+-- ============================================================
+-- Helper: ensure tenant consistency for FK-like relationships
+-- ============================================================
+
+create or replace function church.assert_visitor_belongs_to_church()
+returns trigger
+language plpgsql
+security definer
+set search_path = 'church, pg_temp'
+as $$
+begin
+  if (new.visitor_id is not null) then
+    if not exists (
+      select 1
+      from church.visitors v
+      where v.id = new.visitor_id
+        and v.church_id = new.church_id
+    ) then
+      raise exception 'visitor_id does not belong to church_id' using errcode = '23514';
+    end if;
+  end if;
+  return new;
+end;
+$$;
+
+create or replace function church.assert_followup_visitor_belongs_to_church()
+returns trigger
+language plpgsql
+security definer
+set search_path = 'church, pg_temp'
+as $$
+begin
+  if (new.visitor_id is not null) then
+    if not exists (
+      select 1
+      from church.visitors v
+      where v.id = new.visitor_id
+        and v.church_id = new.church_id
+    ) then
+      raise exception 'visitor_id does not belong to church_id' using errcode = '23514';
+    end if;
+  end if;
+  return new;
+end;
+$$;
+
+create or replace function church.assert_conversion_consistent()
+returns trigger
+language plpgsql
+security definer
+set search_path = 'church, pg_temp'
+as $$
+begin
+  if not exists (
+    select 1
+    from church.visitors v
+    where v.id = new.visitor_id
+      and v.church_id = new.church_id
+  ) then
+    raise exception 'visitor_id does not belong to church_id' using errcode = '23514';
+  end if;
+
+  if not exists (
+    select 1
+    from church.members m
+    where m.id = new.member_id
+      and m.church_id = new.church_id
+  ) then
+    raise exception 'member_id does not belong to church_id' using errcode = '23514';
+  end if;
+
+  return new;
+end;
+$$;
+
+create or replace function church.assert_attendance_consistent()
+returns trigger
+language plpgsql
+security definer
+set search_path = 'church, pg_temp'
+as $$
+begin
+  if (new.member_id is not null) then
+    if not exists (
+      select 1
+      from church.members m
+      where m.id = new.member_id
+        and m.church_id = new.church_id
+    ) then
+      raise exception 'member_id does not belong to church_id' using errcode = '23514';
+    end if;
+  end if;
+
+  if (new.visitor_id is not null) then
+    if not exists (
+      select 1
+      from church.visitors v
+      where v.id = new.visitor_id
+        and v.church_id = new.church_id
+    ) then
+      raise exception 'visitor_id does not belong to church_id' using errcode = '23514';
+    end if;
+  end if;
+
+  return new;
+end;
+$$;
+
+-- ============================================================
+-- 1. VISITORS
+-- ============================================================
+
+create table if not exists church.visitors (
+    id                    uuid primary key default gen_random_uuid(),
+    church_id             uuid not null references church.churches(id),
+    full_name             text not null,
+    phone_number          text,
+    email                 text,
+    gender                text check (gender is null or gender in ('male', 'female')),
+    birthday              date,
+    invited_by_member_id  uuid references church.members(id),
+    source                text,
+
+    visitor_type          text not null default 'first_time'
+      check (visitor_type in (
+          'first_time',
+          'returning',
+          'guest_from_another_church',
+          'conference_guest',
+          'traveling_member',
+          'guest_preacher'
+      )),
+
+    home_church_name      text,
+    home_church_city      text,
+    home_church_pastor    text,
+
+    notes                 text,
+    created_at            timestamptz not null default now()
+);
+
+alter table church.visitors enable row level security;
+
+create index if not exists idx_visitors_church_id            on church.visitors(church_id);
+create index if not exists idx_visitors_church_id_created_at on church.visitors(church_id, created_at);
+create index if not exists idx_visitors_visitor_type         on church.visitors(visitor_type);
+
+-- ============================================================
+-- 2. VISITOR VISITS
+-- ============================================================
+
+create table if not exists church.visitor_visits (
+    id              uuid primary key default gen_random_uuid(),
+    church_id       uuid not null references church.churches(id),
+    visitor_id      uuid not null references church.visitors(id) on delete cascade,
+    event_id        uuid references church.events(id),
+    check_in_time   timestamptz not null default now(),
+    notes           text,
+    created_at      timestamptz not null default now()
+);
+
+alter table church.visitor_visits enable row level security;
+
+create index if not exists idx_visitor_visits_church_id            on church.visitor_visits(church_id);
+create index if not exists idx_visitor_visits_church_id_created_at on church.visitor_visits(church_id, created_at);
+create index if not exists idx_visitor_visits_visitor_id           on church.visitor_visits(visitor_id);
+create index if not exists idx_visitor_visits_event_id             on church.visitor_visits(event_id);
+
+create unique index if not exists uq_visitor_visits_visitor_event
+    on church.visitor_visits(visitor_id, event_id)
+    where event_id is not null;
+
+drop trigger if exists trg_visitor_visits_assert on church.visitor_visits;
+create trigger trg_visitor_visits_assert
+before insert or update on church.visitor_visits
+for each row
+execute function church.assert_visitor_belongs_to_church();
+
+-- ============================================================
+-- 3. VISITOR FOLLOWUPS
+-- ============================================================
+
+create table if not exists church.visitor_followups (
+    id              uuid primary key default gen_random_uuid(),
+    church_id       uuid not null references church.churches(id),
+    visitor_id      uuid not null references church.visitors(id) on delete cascade,
+    assigned_to     uuid references auth.users(id),
+    status          text not null default 'pending'
+                        check (status in ('pending', 'contacted', 'no_response', 'closed')),
+    contact_method  text,
+    next_follow_up  date,
+    notes           text,
+    created_at      timestamptz not null default now()
+);
+
+alter table church.visitor_followups enable row level security;
+
+create index if not exists idx_visitor_followups_church_id            on church.visitor_followups(church_id);
+create index if not exists idx_visitor_followups_church_id_created_at on church.visitor_followups(church_id, created_at);
+create index if not exists idx_visitor_followups_visitor_id           on church.visitor_followups(visitor_id);
+
+drop trigger if exists trg_visitor_followups_assert on church.visitor_followups;
+create trigger trg_visitor_followups_assert
+before insert or update on church.visitor_followups
+for each row
+execute function church.assert_followup_visitor_belongs_to_church();
+
+-- ============================================================
+-- 4. VISITOR -> MEMBER CONVERSION LINK
+-- ============================================================
+
+create table if not exists church.visitor_conversions (
+    id              uuid primary key default gen_random_uuid(),
+    church_id       uuid not null references church.churches(id),
+    visitor_id      uuid not null references church.visitors(id) on delete cascade,
+    member_id       uuid not null references church.members(id) on delete cascade,
+    converted_at    timestamptz not null default now(),
+    converted_by    uuid references auth.users(id),
+    unique (visitor_id)
+);
+
+alter table church.visitor_conversions enable row level security;
+
+create index if not exists idx_visitor_conversions_church_id            on church.visitor_conversions(church_id);
+create index if not exists idx_visitor_conversions_church_id_created_at on church.visitor_conversions(church_id, converted_at);
+create index if not exists idx_visitor_conversions_member_id            on church.visitor_conversions(member_id);
+
+drop trigger if exists trg_visitor_conversions_assert on church.visitor_conversions;
+create trigger trg_visitor_conversions_assert
+before insert or update on church.visitor_conversions
+for each row
+execute function church.assert_conversion_consistent();
+
+-- ============================================================
+-- 5. ATTENDANCE LOGS
+-- ============================================================
+
+alter table church.attendance_logs
+    add column if not exists visitor_id uuid references church.visitors(id);
+
+alter table church.attendance_logs
+    alter column member_id drop not null;
+
+alter table church.attendance_logs
+  drop constraint if exists attendance_logs_member_xor_visitor;
+
+alter table church.attendance_logs
+  add constraint attendance_logs_member_xor_visitor
+  check (
+    (member_id is not null and visitor_id is null)
+    or
+    (member_id is null and visitor_id is not null)
+  );
+
+create index if not exists idx_attendance_logs_visitor_id on church.attendance_logs(visitor_id);
+
+drop index if exists uq_attendance_logs_member_event;
+drop index if exists uq_attendance_logs_visitor_event;
+
+create unique index if not exists uq_attendance_logs_member_event
+    on church.attendance_logs(member_id, event_id)
+    where member_id is not null and event_id is not null;
+
+create unique index if not exists uq_attendance_logs_visitor_event
+    on church.attendance_logs(visitor_id, event_id)
+    where visitor_id is not null and event_id is not null;
+
+drop trigger if exists trg_attendance_logs_assert on church.attendance_logs;
+create trigger trg_attendance_logs_assert
+before insert or update on church.attendance_logs
+for each row
+execute function church.assert_attendance_consistent();
+
+-- ============================================================
+-- 7. BASIC RLS POLICIES
+-- ============================================================
+
+-- visitors
+alter table church.visitors enable row level security;
+
+drop policy if exists tenant_isolation_visitors_select on church.visitors;
+drop policy if exists tenant_isolation_visitors_insert on church.visitors;
+drop policy if exists tenant_isolation_visitors_update on church.visitors;
+drop policy if exists tenant_isolation_visitors_delete on church.visitors;
+
+create policy tenant_isolation_visitors_select
+on church.visitors
+for select
+to authenticated
+using (church_id = church.my_tenant_id());
+
+create policy tenant_isolation_visitors_insert
+on church.visitors
+for insert
+to authenticated
+with check (church_id = church.my_tenant_id());
+
+create policy tenant_isolation_visitors_update
+on church.visitors
+for update
+to authenticated
+using (church_id = church.my_tenant_id())
+with check (church_id = church.my_tenant_id());
+
+create policy tenant_isolation_visitors_delete
+on church.visitors
+for delete
+to authenticated
+using (church_id = church.my_tenant_id());
+
+-- visitor_visits
+alter table church.visitor_visits enable row level security;
+
+drop policy if exists tenant_isolation_visitor_visits_select on church.visitor_visits;
+drop policy if exists tenant_isolation_visitor_visits_insert on church.visitor_visits;
+drop policy if exists tenant_isolation_visitor_visits_update on church.visitor_visits;
+drop policy if exists tenant_isolation_visitor_visits_delete on church.visitor_visits;
+
+create policy tenant_isolation_visitor_visits_select
+on church.visitor_visits
+for select
+to authenticated
+using (church_id = church.my_tenant_id());
+
+create policy tenant_isolation_visitor_visits_insert
+on church.visitor_visits
+for insert
+to authenticated
+with check (church_id = church.my_tenant_id());
+
+create policy tenant_isolation_visitor_visits_update
+on church.visitor_visits
+for update
+to authenticated
+using (church_id = church.my_tenant_id())
+with check (church_id = church.my_tenant_id());
+
+create policy tenant_isolation_visitor_visits_delete
+on church.visitor_visits
+for delete
+to authenticated
+using (church_id = church.my_tenant_id());
+
+-- visitor_followups
+alter table church.visitor_followups enable row level security;
+
+drop policy if exists tenant_isolation_visitor_followups_select on church.visitor_followups;
+drop policy if exists tenant_isolation_visitor_followups_insert on church.visitor_followups;
+drop policy if exists tenant_isolation_visitor_followups_update on church.visitor_followups;
+drop policy if exists tenant_isolation_visitor_followups_delete on church.visitor_followups;
+
+create policy tenant_isolation_visitor_followups_select
+on church.visitor_followups
+for select
+to authenticated
+using (church_id = church.my_tenant_id());
+
+create policy tenant_isolation_visitor_followups_insert
+on church.visitor_followups
+for insert
+to authenticated
+with check (church_id = church.my_tenant_id());
+
+create policy tenant_isolation_visitor_followups_update
+on church.visitor_followups
+for update
+to authenticated
+using (church_id = church.my_tenant_id())
+with check (church_id = church.my_tenant_id());
+
+create policy tenant_isolation_visitor_followups_delete
+on church.visitor_followups
+for delete
+to authenticated
+using (church_id = church.my_tenant_id());
+
+-- visitor_conversions
+alter table church.visitor_conversions enable row level security;
+
+drop policy if exists tenant_isolation_visitor_conversions_select on church.visitor_conversions;
+drop policy if exists tenant_isolation_visitor_conversions_insert on church.visitor_conversions;
+drop policy if exists tenant_isolation_visitor_conversions_update on church.visitor_conversions;
+drop policy if exists tenant_isolation_visitor_conversions_delete on church.visitor_conversions;
+
+create policy tenant_isolation_visitor_conversions_select
+on church.visitor_conversions
+for select
+to authenticated
+using (church_id = church.my_tenant_id());
+
+create policy tenant_isolation_visitor_conversions_insert
+on church.visitor_conversions
+for insert
+to authenticated
+with check (church_id = church.my_tenant_id());
+
+create policy tenant_isolation_visitor_conversions_update
+on church.visitor_conversions
+for update
+to authenticated
+using (church_id = church.my_tenant_id())
+with check (church_id = church.my_tenant_id());
+
+create policy tenant_isolation_visitor_conversions_delete
+on church.visitor_conversions
+for delete
+to authenticated
+using (church_id = church.my_tenant_id());
+
+-- Service role policies for visitors tables
+create policy "Service role bypass on visitors" on church.visitors TO service_role USING (true);
+create policy "Service role bypass on visitor_visits" on church.visitor_visits TO service_role USING (true);
+create policy "Service role bypass on visitor_followups" on church.visitor_followups TO service_role USING (true);
+create policy "Service role bypass on visitor_conversions" on church.visitor_conversions TO service_role USING (true);
+create policy "Service role bypass on attendance_logs" on church.attendance_logs TO service_role USING (true);

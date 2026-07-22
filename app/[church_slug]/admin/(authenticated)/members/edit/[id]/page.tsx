@@ -1,6 +1,7 @@
 import { createClient } from '@/lib/supabase/server';
 import { notFound } from 'next/navigation';
 import { editMember } from '../../actions';
+import SubmitButton from '@/components/SubmitButton';
 
 export default async function EditMemberPage(props: {
   params: Promise<{ church_slug: string; id: string }>;
@@ -97,12 +98,11 @@ export default async function EditMemberPage(props: {
             <label htmlFor="is_youth" className="text-sm font-bold text-[#9A7E65] cursor-pointer">Mark as Youth Member</label>
           </div>
 
-          <button 
-            type="submit"
+          <SubmitButton
             className="w-full py-3.5 bg-[#2B1A0E] text-[#F5E6CE] rounded-xl text-sm font-bold hover:bg-[#3D2614] shadow-md transition-all mt-4 tracking-widest uppercase"
           >
             Update Member
-          </button>
+          </SubmitButton>
         </form>
       </div>
     </div>
