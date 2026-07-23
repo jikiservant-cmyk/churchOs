@@ -100,6 +100,7 @@ CREATE TABLE IF NOT EXISTS public.tenants (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   app_type text NOT NULL DEFAULT 'church', 
   name text NOT NULL,
+  code text, -- Tenant code for Najiki integration
   created_at timestamptz DEFAULT now()
 );
 
