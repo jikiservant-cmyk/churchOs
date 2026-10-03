@@ -1,11 +1,10 @@
 import { Metadata } from 'next';
 import { createAdminClient } from '@/lib/supabase/server';
-import { redirect, notFound } from 'next/navigation';
-import { revalidatePath } from 'next/cache';
+import { requireTenantAdmin } from '@/lib/auth/tenant';
 import { Plus, Calendar, Clock, MapPin, CheckCircle2, ChevronRight, Activity, AlertCircle } from 'lucide-react';
 import Link from 'next/link';
-import { createEvent, getAttendanceFlags, updateEventStatus, claimAdminAccess } from '@/lib/attendance-actions';
-import { ChurchEvent } from '@/lib/attendance-types';
+import { getAttendanceFlags, updateEventStatus } from '@/lib/attendance-actions';
+import { ChurchEvent, AttendanceFlag } from '@/lib/attendance-types';
 import { InactivityRefreshButton } from '@/components/attendance/InactivityRefreshButton';
 import { AttendanceAlerts } from '@/components/attendance/AttendanceAlerts';
 import { CopyPortalLink } from '@/components/attendance/CopyPortalLink';
@@ -21,29 +20,9 @@ import { CreateEventForm } from '@/components/attendance/CreateEventForm';
 export default async function AttendancePage(props: {
   params: Promise<{ church_slug: string }>;
 }) {
-  const resolvedParams = await props.params;
-  const { church_slug } = resolvedParams;
-  const supabase = await createAdminClient();
-
-  // Get Admin Profile to verify access
-  const { data: { user } } = await supabase.auth.getUser();
-  
-  const { data: church } = await supabase
-    .schema('church')
-    .from('churches')
-    .select('id, name, passkey')
-    .eq('slug', church_slug)
-    .single();
-
-  if (!church) notFound();
-
-  // Verify Admin Access explicitly just in case
-  const { data: adminProfile } = await supabase
-    .from('admin_profiles')
-    .select('*')
-    .eq('id', user?.id)
-    .eq('tenant_id', church.id)
-    .maybeSingle();
+  const { church_slug } = await props.params;
+  // Authorisation lives here (data-access layer), not only in the layout.
+  const { church, supabase } = await requireTenantAdmin(church_slug);
 
   const { data: events } = await supabase
     .schema('church')
@@ -51,6 +30,15 @@ export default async function AttendancePage(props: {
     .select('*')
     .eq('church_id', church.id)
     .order('event_date', { ascending: false });
+
+  // Only metadata about the passkey; the hash never leaves the server.
+  const adminDb = await createAdminClient();
+  const { data: cred } = await adminDb
+    .schema('church')
+    .from('usher_credentials')
+    .select('rotated_at')
+    .eq('church_id', church.id)
+    .maybeSingle();
 
   const activeEvents = events?.filter(e => e.status === 'active') || [];
   const upcomingEvents = events?.filter(e => e.status === 'upcoming') || [];
@@ -86,38 +74,17 @@ export default async function AttendancePage(props: {
       </div>
 
       <div className="flex items-center justify-end gap-3 pt-2">
-        <CopyPortalLink churchSlug={church_slug} passkey={church.passkey || '1234'} />
+        <CopyPortalLink churchSlug={church_slug} />
       </div>
 
-      <PasskeyManager 
-        churchId={church.id} 
-        initialPasskey={church.passkey || '1234'} 
-        churchSlug={church_slug} 
+      <PasskeyManager
+        churchSlug={church_slug}
+        hasPasskey={!!cred}
+        rotatedAt={cred?.rotated_at ?? null}
       />
 
       {/* Action Bar */}
       <CreateEventForm churchId={church.id} churchSlug={church_slug} />
-
-      {/* Admin Status Debug */}
-      {!adminProfile && user && (
-        <div className="bg-amber-50 border border-amber-200 p-4 rounded-xl space-y-3 text-amber-800">
-          <div className="flex items-center gap-3">
-            <AlertCircle className="w-5 h-5" />
-            <div>
-              <p className="font-bold">Access Warning</p>
-              <p className="text-[13px]">You are logged in as <span className="font-mono text-[11px]">{user?.email || 'authenticated user'}</span>, but you aren&apos;t registered as an admin for this church.</p>
-            </div>
-          </div>
-          <form action={async () => {
-            'use server';
-            await claimAdminAccess(church.id, church_slug);
-          }}>
-            <button type="submit" className="text-[11px] font-bold uppercase tracking-widest bg-amber-200 hover:bg-amber-300 px-4 py-2 rounded-lg transition-colors">
-              Claim Admin Access for this Church
-            </button>
-          </form>
-        </div>
-      )}
 
       {/* Active Services (Checking In Now) */}
       {activeEvents.length > 0 && (
@@ -169,7 +136,7 @@ export default async function AttendancePage(props: {
           </div>
         </div>
 
-        <AttendanceAlerts flags={flags || []} churchSlug={church_slug} />
+        <AttendanceAlerts flags={(flags || []) as unknown as AttendanceFlag[]} churchSlug={church_slug} />
       </section>
 
       {/* Recent History */}

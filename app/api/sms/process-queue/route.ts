@@ -1,76 +1,57 @@
 /**
- * POST /api/sms/process-queue  (also handles GET for Vercel Cron)
+ * POST|GET /api/sms/process-queue
  *
- * Claims and processes a batch of PENDING sms_queue items.
- * This route is designed to be:
- *   • Called by /api/sms/enqueue immediately after queuing (fire-and-forget)
- *   • Called by Vercel Cron every minute as a safety net for retries
+ * Claims and delivers a batch of PENDING sms_queue items. Intended for a
+ * scheduler (Vercel Cron sends `Authorization: Bearer $CRON_SECRET`).
+ * In-app enqueue paths call `processQueueBatch` directly and do not use this.
  *
- * Protected by QUEUE_PROCESSOR_SECRET env variable.
- * Add to your .env:
- *   QUEUE_PROCESSOR_SECRET=<a long random string>
- *
- * And to vercel.json for the cron (optional but recommended):
- * {
- *   "crons": [{
- *     "path": "/api/sms/process-queue",
- *     "schedule": "* * * * *"
- *   }]
- * }
+ * Fails CLOSED: with neither QUEUE_PROCESSOR_SECRET nor CRON_SECRET configured
+ * the endpoint is disabled (it used to be open to the internet).
  */
-
 import { NextResponse } from 'next/server';
 import { processQueueBatch } from '@/lib/queue-actions';
+import { safeEqual, isUuid } from '@/lib/security';
 
-const QUEUE_SECRET = process.env.QUEUE_PROCESSOR_SECRET;
+export const dynamic = 'force-dynamic';
+export const maxDuration = 120;
 
-function isAuthorised(req: Request): boolean {
-  // No secret configured → open (useful for local dev, not recommended for production)
-  if (!QUEUE_SECRET) return true;
+type Gate = { ok: true } | { ok: false; status: number };
 
-  // POST: secret in header x-queue-secret
-  const headerSecret = req.headers.get('x-queue-secret');
-  if (headerSecret === QUEUE_SECRET) return true;
+function authorise(req: Request): Gate {
+  const secrets = [process.env.QUEUE_PROCESSOR_SECRET, process.env.CRON_SECRET].filter((s): s is string => !!s && s.length >= 16);
+  if (secrets.length === 0) return { ok: false, status: 503 };
 
-  // GET (Vercel Cron): secret in Authorization: Bearer <secret>
-  const bearerSecret = req.headers.get('authorization')?.replace('Bearer ', '');
-  if (bearerSecret === QUEUE_SECRET) return true;
+  const candidates = [
+    req.headers.get('x-queue-secret'),
+    req.headers.get('authorization')?.replace(/^Bearer\s+/i, ''),
+  ].filter((c): c is string => !!c);
 
-  return false;
+  // safeEqual hashes both sides, so comparison time does not depend on content or length.
+  const ok = candidates.some((c) => secrets.some((s) => safeEqual(c, s)));
+  return ok ? { ok: true } : { ok: false, status: 401 };
 }
 
-// ── POST — called programmatically (fire-and-forget from /api/sms/enqueue) ──
+async function run(tenantId: string | undefined, batchSize: number) {
+  try {
+    const result = await processQueueBatch({ tenantId, batchSize: Math.max(1, Math.min(batchSize, 20)) });
+    return NextResponse.json({ success: true, ...result });
+  } catch (err) {
+    console.error('[process-queue] failed:', (err as Error).message);
+    return NextResponse.json({ error: 'Processing failed' }, { status: 500 });
+  }
+}
+
 export async function POST(req: Request) {
-  if (!isAuthorised(req)) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
+  const gate = authorise(req);
+  if (!gate.ok) return NextResponse.json({ error: gate.status === 503 ? 'Not configured' : 'Unauthorized' }, { status: gate.status });
 
-  try {
-    const body       = await req.json().catch(() => ({}));
-    const tenantId   = (body?.churchId as string | undefined) ?? undefined;
-    const batchSize  = Math.min(Number(body?.batchSize ?? 15), 20); // cap at 20
-
-    const result = await processQueueBatch({ tenantId, batchSize });
-
-    return NextResponse.json({ success: true, ...result });
-  } catch (err: any) {
-    console.error('[ProcessQueue] Error:', err);
-    return NextResponse.json({ error: err.message ?? 'Processing failed' }, { status: 500 });
-  }
+  const body = await req.json().catch(() => ({}));
+  const tenantId = isUuid(body?.churchId) ? body.churchId : undefined;
+  return run(tenantId, Number(body?.batchSize) || 15);
 }
 
-// ── GET — called by Vercel Cron ─────────────────────────────────────────────
 export async function GET(req: Request) {
-  if (!isAuthorised(req)) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
-
-  try {
-    // Cron invocation processes ALL tenants, no filtering
-    const result = await processQueueBatch({ batchSize: 15 });
-    return NextResponse.json({ success: true, ...result });
-  } catch (err: any) {
-    console.error('[ProcessQueue/Cron] Error:', err);
-    return NextResponse.json({ error: err.message ?? 'Processing failed' }, { status: 500 });
-  }
+  const gate = authorise(req);
+  if (!gate.ok) return NextResponse.json({ error: gate.status === 503 ? 'Not configured' : 'Unauthorized' }, { status: gate.status });
+  return run(undefined, 15);
 }

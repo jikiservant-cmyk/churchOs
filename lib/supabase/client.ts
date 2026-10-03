@@ -20,10 +20,9 @@ export function createClient() {
     url,
     key,
     {
-      cookieOptions: {
-        sameSite: 'none',
-        secure: true,
-      }
+      cookieOptions: process.env.NEXT_PUBLIC_ALLOW_CROSS_SITE_COOKIES === 'true'
+        ? { sameSite: 'none', secure: true }
+        : { sameSite: 'lax', secure: process.env.NODE_ENV === 'production' }
     }
   );
 }

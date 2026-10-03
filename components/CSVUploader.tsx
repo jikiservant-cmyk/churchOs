@@ -32,7 +32,6 @@ export default function CSVUploader({ churchSlug, type, onUpload }: CSVUploaderP
       complete: async (results) => {
         try {
           if (results.errors.length > 0) {
-            console.error('CSV Parsing errors:', results.errors);
             setError(`Error parsing CSV: ${results.errors[0].message}`);
             setLoading(false);
             return;

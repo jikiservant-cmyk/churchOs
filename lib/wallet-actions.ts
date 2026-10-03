@@ -1,241 +1,130 @@
 'use server';
 
-import { createClient, createAdminClient } from '@/lib/supabase/server';
-import { revalidatePath } from 'next/cache';
+import { randomUUID } from 'crypto';
+import { createAdminClient } from '@/lib/supabase/server';
+import { getCurrentTenantAdmin } from '@/lib/auth/tenant';
+import { rateLimit } from '@/lib/security';
+import { audit } from '@/lib/audit';
 import { normalizeUgPhone } from './utils';
 
-// Helper to format phone for Najiki (accepts E.164 or standard international format)
-function formatPhoneForNajiki(phone: string): string {
-  // Najiki accepts both formats, let's just pass it through
-  // But ensure no special chars
-  const cleaned = phone.replace(/\D/g, '');
-  // If starts with 256 (Uganda), we can keep as is or convert to 0... either is fine
-  if (cleaned.startsWith('256')) return `0${cleaned.slice(3)}`;
-  // If starts with 0, keep as is
-  if (cleaned.startsWith('0')) return cleaned;
-  // Otherwise return original cleaned number
-  return cleaned;
+const MIN_TOPUP_UGX = 2_000;
+const MAX_TOPUP_UGX = 5_000_000;
+
+/** Najiki wants the local 0XXXXXXXXX form. Input is already validated E.164 (+256…). */
+function toLocalFormat(e164: string): string {
+  const digits = e164.replace(/\D/g, '');
+  return digits.startsWith('256') ? `0${digits.slice(3)}` : digits;
 }
 
-// Najiki Payment Initiation
+/**
+ * Starts a mobile-money top-up for the CALLER'S church.
+ *
+ * The tenant is derived from the signed-in admin's profile; a `churchId` in the
+ * form is ignored. (The old action trusted it, so anyone could create payments
+ * attributed to any church.) Crediting happens only in the signed webhook.
+ *
+ * NOTE: the previous `topUpWallet` (free money, no auth) and `emptyWallet`
+ * actions were removed. Nothing in the UI used them.
+ */
 export async function initiateNajikiPayment(formData: FormData) {
   try {
-    const churchId = formData.get('churchId') as string;
-    const amountStr = formData.get('amount') as string;
-    const amount = parseInt(amountStr, 10);
-    const phoneNumber = formData.get('phoneNumber') as string;
+    const admin = await getCurrentTenantAdmin();
+    if (!admin) return { error: 'Please sign in as a church admin to top up.' };
+    const tenantId = admin.churchId;
 
-    console.log('[Najiki] Initiation started:', { churchId, amount, phoneNumber });
+    const amount = Number(formData.get('amount'));
+    if (!Number.isInteger(amount) || amount < MIN_TOPUP_UGX || amount > MAX_TOPUP_UGX) {
+      return { error: `Amount must be between ${MIN_TOPUP_UGX.toLocaleString()} and ${MAX_TOPUP_UGX.toLocaleString()} UGX.` };
+    }
+    const phone = normalizeUgPhone(String(formData.get('phoneNumber') ?? ''));
+    if (!phone) return { error: 'Please enter a valid Ugandan mobile number.' };
 
-    if (!churchId || !phoneNumber || isNaN(amount)) {
-      console.error('[Najiki] Missing or invalid fields:', { churchId, phoneNumber, amount });
-      return { error: 'Missing or invalid required fields' };
+    if (!(await rateLimit(`topup:${tenantId}`, 5, 10 * 60)) || !(await rateLimit(`topup-user:${admin.user.id}`, 10, 60 * 60))) {
+      return { error: 'Too many top-up attempts. Please wait a few minutes.' };
     }
 
     const apiKey = process.env.NAJIKI_API_KEY;
     const applicationCode = process.env.NAJIKI_APPLICATION_CODE;
-
     if (!apiKey) {
-      console.error('[Najiki] API credentials missing from environment.');
-      return { error: 'Payment service not configured' };
+      console.error('[najiki] NAJIKI_API_KEY is not configured');
+      return { error: 'Payment service not configured.' };
     }
+    const baseUrl = (process.env.NAJIKI_API_URL || 'https://najiki.netlify.app').replace(/\/$/, '');
 
-    // 0. Create admin client
-    const supabaseAdmin = await createAdminClient();
-
-    // 1. Fetch tenant code from database
-    const { data: tenant, error: tenantError } = await supabaseAdmin
-      .from('tenants')
-      .select('code')
-      .eq('id', churchId)
-      .maybeSingle();
-
+    const db = await createAdminClient();
+    const { data: tenant, error: tenantError } = await db.from('tenants').select('code').eq('id', tenantId).maybeSingle();
     if (tenantError) {
-      console.error('[Najiki] Failed to fetch tenant:', tenantError);
-      return { error: 'Failed to load tenant data' };
+      console.error('[najiki] tenant lookup failed:', tenantError.code);
+      return { error: 'Failed to load church data.' };
     }
+    const tenantCode = tenant?.code || process.env.NAJIKI_TENANT_CODE;
+    if (!tenantCode) return { error: 'Payment account is not configured for this church.' };
 
-    // Resolve tenantCode: use tenant.code first, then fallback to env var
-    let tenantCode = tenant?.code;
-    if (!tenantCode) {
-      // Fallback to env var if tenant doesn't have a code
-      tenantCode = process.env.NAJIKI_TENANT_CODE;
-      console.warn('[Najiki] No tenant code found in database, using env var fallback');
-    }
-
-    if (!tenantCode) {
-      console.error('[Najiki] No tenant code available (neither in database nor env)');
-      return { error: 'Tenant code not configured' };
-    }
-
-    // 2. Create a pending transaction in our DB
-    const reference = `CHURCH-${Date.now()}-${Math.random().toString(36).substring(7).toUpperCase()}`;
-
-    const { error: txError } = await supabaseAdmin.from('wallet_transactions').insert({
-      tenant_id: churchId,
-      amount: amount,
+    // Pending transaction first; the webhook credits THIS recorded amount.
+    const reference = `CHURCH-${randomUUID()}`;
+    const { error: txError } = await db.from('wallet_transactions').insert({
+      tenant_id: tenantId,
+      amount,
       type: 'TOPUP',
-      description: `Najiki Top-up for ${phoneNumber}`,
+      description: 'Mobile money top-up',
       reference_code: reference,
       status: 'pending',
       product: 'sms',
       revenue_ugx: 0,
-      created_by: 'system',
+      created_by: admin.user.id,
     });
-
     if (txError) {
-      console.error('[Najiki] Failed to create pending transaction:', txError);
-      return {
-        error: `Database error: ${txError.message}`
-      }
+      console.error('[najiki] pending tx insert failed:', txError.code, txError.message);
+      return { error: 'Could not start the payment. Please try again.' };
     }
 
-    // 3. Format phone number to E.164 or standard international format
-    const formattedPhone = formatPhoneForNajiki(phoneNumber);
+    const markFailed = (extra: Record<string, unknown>) =>
+      db.from('wallet_transactions').update({ status: 'failed', provider_payload: extra }).eq('reference_code', reference).eq('status', 'pending');
 
-    // 4. Call Najiki API
-    const requestBody = {
-      amount: amount,
-      phoneNumber: formattedPhone,
-      reference: reference,
-      currency: 'UGX',
-      description: 'ChurchOS SMS Wallet Top-up',
-      externalEntityId: churchId,
-      metadata: { churchId, source: 'admin-dashboard' },
-      ...(applicationCode ? { applicationCode } : {}),
-      tenantCode: tenantCode
-    };
-
-    console.log('[Najiki] Sending request to /api/payments:', JSON.stringify({ ...requestBody, phoneNumber: 'REDACTED' }));
-
-    const response = await fetch('https://najiki.netlify.app/api/payments', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-API-Key': apiKey, // Using recommended API key header
-        // Alternatively could use: 'Authorization': `Bearer ${apiKey}`
-      },
-      body: JSON.stringify(requestBody),
-    });
-
-    let result;
-    const responseText = await response.text();
+    let response: Response;
+    let result: Record<string, any> = {};
     try {
-      result = JSON.parse(responseText);
-    } catch (e) {
-      console.error('[Najiki] Failed to parse JSON response. Raw response:', responseText);
-      result = { message: 'Invalid response from payment provider' };
+      response = await fetch(`${baseUrl}/api/payments`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
+        body: JSON.stringify({
+          amount,
+          phoneNumber: toLocalFormat(phone),
+          reference,
+          currency: 'UGX',
+          description: 'ChurchOS SMS Wallet Top-up',
+          externalEntityId: tenantId,
+          metadata: { churchId: tenantId, source: 'admin-dashboard' },
+          ...(applicationCode ? { applicationCode } : {}),
+          tenantCode,
+        }),
+        signal: AbortSignal.timeout(20_000),
+      });
+      const text = await response.text();
+      try { result = JSON.parse(text); } catch { result = { message: 'Invalid response from payment provider' }; }
+    } catch (err) {
+      console.error('[najiki] request failed:', (err as Error).message);
+      await markFailed({ error: 'request_failed' });
+      return { error: 'Payment provider unreachable. Please try again.' };
     }
-
-    console.log('[Najiki] API Response:', JSON.stringify(result));
 
     if (!response.ok) {
-      console.error('[Najiki] API Error Response:', result);
-      // Mark as failed in DB
-      await supabaseAdmin
-        .from('wallet_transactions')
-        .update({ 
-          status: 'failed', 
-          provider_payload: { ...result, raw_response: responseText.slice(0, 500) } 
-        })
-        .eq('reference_code', reference);
-
-      return { error: result.error || result.message || 'Payment request failed' };
+      console.error('[najiki] provider returned', response.status);
+      await markFailed({ status: response.status, message: String(result.error || result.message || '').slice(0, 200) });
+      return { error: 'Payment request failed. Please try again.' };
     }
 
-    // 5. Update transaction with Najiki paymentIntentId
-    if (result.paymentIntentId) {
-      await supabaseAdmin
+    if (typeof result.paymentIntentId === 'string') {
+      await db
         .from('wallet_transactions')
-        .update({ 
-          idempotency_key: result.paymentIntentId,
-          provider_payload: result 
-        })
+        .update({ idempotency_key: result.paymentIntentId, provider_payload: { paymentIntentId: result.paymentIntentId, status: result.status ?? null } })
         .eq('reference_code', reference);
     }
 
-    return { success: true, message: 'Payment prompt sent to your phone!', paymentIntentId: result.paymentIntentId, reference: reference };
-  } catch (err: any) {
-    console.error('[Najiki] Unexpected error during initiation:', err);
-    return { error: 'An unexpected error occurred: ' + (err.message || 'Unknown error') };
+    await audit('wallet.topup_initiated', { tenantId, actor: admin.user.id, meta: { amount, reference } });
+    return { success: true, message: 'Payment prompt sent to your phone!', paymentIntentId: result.paymentIntentId, reference };
+  } catch (err) {
+    console.error('[najiki] unexpected error:', (err as Error).message);
+    return { error: 'An unexpected error occurred. Please try again.' };
   }
-}
-
-export async function topUpWallet(formData: FormData): Promise<{ error?: string; success?: boolean; newBalance?: number }> {
-  try {
-    const churchId = formData.get('churchId') as string;
-    const amount = parseInt(formData.get('amount') as string, 10) || 10000;
-
-    if (!churchId) {
-      console.error('TopUp Error: Missing churchId in top up action.');
-      return { error: 'Missing churchId' };
-    }
-
-    const supabase = await createClient();
-    const adminSupabase = await createAdminClient();
-
-    // Atomic increment via RPC — avoids read-then-write race condition.
-    const { data: newBalance, error } = await adminSupabase.rpc('increment_wallet_balance', {
-      p_tenant_id: churchId,
-      p_amount: amount,
-      p_app_type: 'church',
-    });
-
-    if (error) {
-      console.error('Failed to top up wallet:', error);
-      return { error: error.message };
-    }
-
-    console.log(`[Wallet] Top-up successful. New balance: ${newBalance}`);
-
-    // Record a transaction to maintain history
-    const { data: { user } } = await supabase.auth.getUser();
-
-    const { error: txError } = await adminSupabase.from('wallet_transactions').insert({
-      tenant_id: churchId,
-      amount: amount,
-      type: 'TOPUP',
-      description: 'Test Top-up via Admin Dashboard',
-      reference_code: 'TOPUP_TEST_' + Date.now(),
-      status: 'success',
-      product: 'sms',
-      revenue_ugx: 0,
-      created_by: user?.id || 'system',
-    });
-
-    if (txError) {
-      console.error('Failed to record top up transaction:', JSON.stringify(txError, null, 2));
-    }
-  } catch (err: any) {
-    console.error('Unhandled exception in topUpWallet:', err);
-    return { error: err.message || 'An unexpected error occurred' };
-  }
-
-  revalidatePath('/', 'layout');
-  return { success: true };
-}
-
-export async function emptyWallet(formData: FormData) {
-  const churchId = formData.get('churchId') as string;
-
-  if (!churchId) {
-    return;
-  }
-
-  const supabase = await createClient();
-
-  const { error } = await supabase
-    .from('wallets')
-    .update({
-      balance: 0,
-      last_updated: new Date().toISOString(),
-    })
-    .eq('tenant_id', churchId);
-
-  if (error) {
-    console.error('Failed to empty wallet:', error);
-    return;
-  }
-
-  revalidatePath('/', 'layout');
 }

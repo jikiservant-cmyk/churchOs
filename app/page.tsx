@@ -15,7 +15,7 @@ export default async function RootLoginPage({
   const supabase = await createClient();
   
   // Normalize params to strings
-  let targetSlug = Array.isArray(resolvedSearchParams.slug) ? resolvedSearchParams.slug[0] : resolvedSearchParams.slug;
+  const targetSlug = Array.isArray(resolvedSearchParams.slug) ? resolvedSearchParams.slug[0] : resolvedSearchParams.slug;
   let loginError = Array.isArray(resolvedSearchParams.error) ? resolvedSearchParams.error[0] : resolvedSearchParams.error;
 
   let redirectTo: string | null = null;
@@ -52,7 +52,7 @@ export default async function RootLoginPage({
         }
       }
     } catch (err: any) {
-      console.error('[RootPage] Auth check error:', err);
+      console.error('[RootPage] auth check failed:', (err as Error).message);
     }
   }
 
@@ -61,24 +61,9 @@ export default async function RootLoginPage({
     redirect(redirectTo);
   }
 
-  // 2. Resolve Branding Slug
-  if (!targetSlug) {
-    try {
-      const { data: firstChurch } = await supabase
-        .schema('church')
-        .from('churches')
-        .select('slug')
-        .order('created_at', { ascending: true })
-        .limit(1)
-        .maybeSingle();
-        
-      targetSlug = firstChurch?.slug || undefined;
-    } catch (e) {
-      console.warn('[RootPage] Fallback slug resolution failed');
-    }
-  }
-
   // 3. Resolve Church Object for Branding
+  // Only brand the page when a slug is explicitly requested. (It used to fall back
+  // to the oldest church in the database, leaking another tenant's branding.)
   const finalSlug = targetSlug || 'admin';
   const churchData = targetSlug ? await getChurchBySlug(targetSlug) : null;
 

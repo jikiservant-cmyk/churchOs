@@ -1,670 +1,464 @@
 'use server';
 
-import { createClient, createAdminClient } from '@/lib/supabase/server';
+import { headers } from 'next/headers';
 import { revalidatePath } from 'next/cache';
-import { cookies } from 'next/headers';
-import { ChurchEvent, AttendanceLog, AttendanceFlag, AttendanceFlagStatus } from './attendance-types';
-import { SignJWT, jwtVerify } from 'jose';
-import { sendSingleSMS } from './sms-actions';
+import { after } from 'next/server';
+import { createAdminClient } from '@/lib/supabase/server';
+import { AttendanceFlagStatus } from './attendance-types';
+import { getChurchBySlug } from '@/lib/db';
+import { assertTenantAdmin, getTenantAdminForChurchId, AuthError } from '@/lib/auth/tenant';
+import { issueUsherSession, getUsherSession, clearUsherSession } from '@/lib/auth/usher';
+import { generatePasskey, hashPasskey, verifyPasskey, normalizePasskeyInput } from '@/lib/passkey';
+import { normalizeSlug, isUuid, getClientIp, rateLimit } from '@/lib/security';
+import { audit } from '@/lib/audit';
+import { enqueueBroadcast, processQueueBatch } from '@/lib/queue-actions';
 
-function getJwtSecret(): Uint8Array {
-  const jwtSecretValue = process.env.USHER_JWT_SECRET || process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!jwtSecretValue) {
-    throw new Error('USHER_JWT_SECRET (or SUPABASE_SERVICE_ROLE_KEY) environment variable is not set. Cannot sign usher sessions.');
-  }
-  return new TextEncoder().encode(jwtSecretValue);
+type Fail = { error: string };
+/** Uniform action result so clients can read `.success` / `.error` without narrowing. */
+type R<T extends object = object> = Promise<{ success?: boolean; error?: string } & T>;
+
+function failure(err: unknown, fallback: string): Fail {
+  if (err instanceof AuthError) return { error: err.message };
+  console.error(`[attendance] ${fallback}:`, (err as Error)?.message);
+  return { error: fallback };
 }
 
-export async function validateUsherPasskey(churchSlug: string, passkey: string) {
-  try {
-    console.log('[validateUsherPasskey] Validating for slug:', churchSlug);
-    const supabase = await createAdminClient();
-    
-    // Use ilike logic or explicit lowercase to ensure slug matches even if URL is mixed case
-    const { data: church } = await supabase
-      .schema('church')
-      .from('churches')
-      .select('id, name, passkey')
-      .ilike('slug', churchSlug)
-      .maybeSingle();
+// ── Usher passkey login ─────────────────────────────────────────────────────
 
-    if (!church) {
-      console.error('[validateUsherPasskey] No church found for slug:', churchSlug);
-      return { success: false, error: 'Church not found.' };
+const GENERIC_PASSKEY_ERROR = 'Invalid passkey. Please check and try again.';
+
+export async function validateUsherPasskey(churchSlug: string, passkeyInput: string) {
+  const slug = normalizeSlug(churchSlug);
+  const passkey = normalizePasskeyInput(passkeyInput);
+  if (!slug || !passkey) return { success: false, error: GENERIC_PASSKEY_ERROR };
+
+  // Brute-force protection: per (IP, church) and per church overall.
+  const ip = getClientIp(await headers());
+  const allowed =
+    (await rateLimit(`usher:ip:${ip}:${slug}`, 8, 15 * 60)) &&
+    (await rateLimit(`usher:slug:${slug}`, 40, 60 * 60));
+  if (!allowed) return { success: false, error: 'Too many attempts. Please wait a few minutes and try again.' };
+
+  try {
+    const church = await getChurchBySlug(slug);
+    const admin = await createAdminClient();
+    const { data: cred } = church
+      ? await admin.schema('church').from('usher_credentials').select('passkey_hash, rotated_at').eq('church_id', church.id).maybeSingle()
+      : { data: null };
+
+    // Same response for "no such church", "no passkey set" and "wrong passkey".
+    if (!church || !cred || !(await verifyPasskey(passkey, cred.passkey_hash))) {
+      return { success: false, error: GENERIC_PASSKEY_ERROR };
     }
 
-    console.log('[validateUsherPasskey] Found church:', church.name, 'Expected Passkey:', church.passkey);
-
-    if (church.passkey?.toUpperCase() !== passkey.toUpperCase()) {
-      return { success: false, error: 'Invalid passkey. Please check and try again.' };
-    }
-
-    const churchId = church.id;
-    const churchName = church.name;
-
-    // 2. Create a cryptographically signed JWT for the session
-    const token = await new SignJWT({
-      church_id: churchId,
-      church_name: churchName,
-      church_slug: churchSlug.toLowerCase(),
-      role: 'usher'
-    })
-      .setProtectedHeader({ alg: 'HS256' })
-      .setIssuedAt()
-      .setExpirationTime('24h')
-      .sign(getJwtSecret());
-
-    const cookieStore = await cookies();
-    const cookieName = `usher_session_${churchSlug.toLowerCase()}`;
-    
-    cookieStore.set(cookieName, token, {
-      httpOnly: true,
-      secure: true,
-      sameSite: 'lax',
-      path: '/',
-      maxAge: 60 * 60 * 24 // 24 hours
-    });
-
-    revalidatePath(`/${churchSlug}/usher/dashboard`);
-    return { success: true, churchName };
-
-  } catch (error) {
-    console.error('CRITICAL: validateUsherPasskey error:', error);
-    return { 
-      success: false, 
-      error: 'An unexpected security or network error occurred' 
-    };
-  }
-}
-
-export async function getUsherSession(churchSlug: string) {
-  const cookieStore = await cookies();
-  const cookieName = `usher_session_${churchSlug.toLowerCase()}`;
-  const token = cookieStore.get(cookieName)?.value;
-  
-  if (!token) return null;
-  
-  try {
-    const { payload } = await jwtVerify(token, getJwtSecret());
-    return payload as any;
-  } catch (e) {
-    console.error('Usher session verification failed:', e);
-    return null;
+    await issueUsherSession(church, cred.rotated_at);
+    return { success: true, churchName: church.name };
+  } catch (err) {
+    console.error('[validateUsherPasskey] failed:', (err as Error).message);
+    return { success: false, error: 'Something went wrong. Please try again.' };
   }
 }
 
 export async function logoutUsher(churchSlug: string) {
-  const cookieStore = await cookies();
-  const cookieName = `usher_session_${churchSlug.toLowerCase()}`;
-  cookieStore.delete(cookieName);
+  await clearUsherSession(churchSlug);
   return { success: true };
 }
 
-export async function createEvent(formData: FormData, churchId: string, churchSlug: string) {
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
-  
-  if (!user) {
-    console.error('CreateEvent: No authenticated user found');
-    return { error: 'You must be logged in to create services.' };
+/**
+ * Generates a NEW random passkey. Only the hash is stored, so the plaintext is
+ * returned exactly once. Rotating revokes all active usher sessions.
+ */
+export async function rotateUsherPasskey(churchSlug: string): R<{ passkey?: string }> {
+  try {
+    const { church, user } = await assertTenantAdmin(churchSlug);
+    if (!(await rateLimit(`passkey-rotate:${church.id}`, 10, 60 * 60))) {
+      return { error: 'Too many passkey changes. Try again later.' };
+    }
+    const passkey = generatePasskey();
+    const admin = await createAdminClient();
+    const { error } = await admin
+      .schema('church')
+      .from('usher_credentials')
+      .upsert({ church_id: church.id, passkey_hash: await hashPasskey(passkey), rotated_at: new Date().toISOString() }, { onConflict: 'church_id' });
+    if (error) throw new Error(error.message);
+
+    await audit('usher_passkey.rotated', { tenantId: church.id, actor: user.id });
+    revalidatePath(`/${church.slug}/admin/attendance`);
+    return { success: true, passkey };
+  } catch (err) {
+    return failure(err, 'Failed to update passkey.');
   }
+}
 
-  const name = formData.get('name') as string;
-  const serviceType = formData.get('service_type') as 'sunday_service' | 'bible_study' | 'prayer_meeting' | 'youth_service';
-  const eventDate = formData.get('event_date') as string;
-  const startTime = formData.get('start_time') as string;
-  const location = formData.get('location') as string;
+// ── Events ──────────────────────────────────────────────────────────────────
 
-  console.log('Creating event for church:', churchId, 'by user:', user.id);
+const SERVICE_TYPES = ['sunday_service', 'bible_study', 'prayer_meeting', 'youth_service'] as const;
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const TIME_RE = /^\d{2}:\d{2}(:\d{2})?$/;
 
-  const { error } = await supabase
+export async function createEvent(formData: FormData, churchId: string, churchSlug: string): R {
+  try {
+    const { church, supabase, user } = await assertTenantAdmin(churchSlug);
+    if (churchId !== church.id) return { error: 'Access denied.' };
+
+    const name = String(formData.get('name') ?? '').trim();
+    const serviceType = String(formData.get('service_type') ?? '');
+    const eventDate = String(formData.get('event_date') ?? '');
+    const startTime = String(formData.get('start_time') ?? '');
+    const location = String(formData.get('location') ?? '').trim();
+
+    if (name.length < 1 || name.length > 100) return { error: 'Service name must be 1–100 characters.' };
+    if (!(SERVICE_TYPES as readonly string[]).includes(serviceType)) return { error: 'Invalid service type.' };
+    if (!DATE_RE.test(eventDate) || Number.isNaN(Date.parse(eventDate))) return { error: 'Invalid date.' };
+    if (!TIME_RE.test(startTime)) return { error: 'Invalid start time.' };
+    if (location.length > 200) return { error: 'Location is too long.' };
+
+    // Insert only. The previous upsert silently reset an existing event's status
+    // to 'upcoming' (re-opening completed services).
+    const { data, error } = await supabase
+      .schema('church')
+      .from('events')
+      .upsert(
+        { church_id: church.id, name, service_type: serviceType, event_date: eventDate, start_time: startTime, location: location || null, status: 'upcoming', created_by: user.id },
+        { onConflict: 'church_id,service_type,event_date,start_time', ignoreDuplicates: true },
+      )
+      .select('id');
+
+    if (error) {
+      console.error('[createEvent] failed:', error.code, error.message);
+      return { error: 'Failed to create the service.' };
+    }
+    if (!data || data.length === 0) return { error: 'A service of this type already exists at that date and time.' };
+
+    revalidatePath(`/${church.slug}/admin/attendance`);
+    return { success: true };
+  } catch (err) {
+    return failure(err, 'Failed to create the service.');
+  }
+}
+
+const STATUS_ORDER = ['upcoming', 'active', 'completed'] as const;
+
+export async function updateEventStatus(eventId: string, status: 'upcoming' | 'active' | 'completed', churchSlug: string): R {
+  try {
+    if (!isUuid(eventId) || !(STATUS_ORDER as readonly string[]).includes(status)) return { error: 'Invalid request.' };
+
+    // 1. Authorise FIRST (previously admin-client writes ran before any check).
+    const { church, supabase } = await assertTenantAdmin(churchSlug);
+
+    // 2. The event must belong to the caller's church (RLS + explicit filter).
+    const { data: event } = await supabase
+      .schema('church')
+      .from('events')
+      .select('id, status')
+      .eq('id', eventId)
+      .eq('church_id', church.id)
+      .maybeSingle();
+    if (!event) return { error: 'Event not found.' };
+
+    if (STATUS_ORDER.indexOf(status) <= STATUS_ORDER.indexOf(event.status)) {
+      return { error: `Service is already ${event.status}.` };
+    }
+
+    if (status === 'completed') {
+      // Atomic: mark absentees (never overwriting existing rows), recount, complete.
+      const admin = await createAdminClient();
+      const { error } = await admin.schema('church').rpc('finalize_event', { p_event_id: eventId });
+      if (error) throw new Error(error.message);
+    } else {
+      const { error } = await supabase
+        .schema('church')
+        .from('events')
+        .update({ status })
+        .eq('id', eventId)
+        .eq('church_id', church.id);
+      if (error) throw new Error(error.message);
+    }
+
+    revalidatePath(`/${church.slug}/admin/attendance`);
+    revalidatePath(`/${church.slug}/admin/attendance/${eventId}`);
+    revalidatePath(`/${church.slug}/usher/dashboard`);
+    return { success: true };
+  } catch (err) {
+    return failure(err, 'Could not update the service.');
+  }
+}
+
+// ── Check-in (admin OR usher) ───────────────────────────────────────────────
+
+async function authorizeCheckIn(churchSlug: string, eventId: string) {
+  const slug = normalizeSlug(churchSlug);
+  if (!slug || !isUuid(eventId)) throw new AuthError('Invalid request.', 404);
+
+  const admin = await createAdminClient();
+  const { data: event } = await admin
     .schema('church')
     .from('events')
-    .upsert({
-      church_id: churchId,
-      name,
-      service_type: serviceType,
-      event_date: eventDate,
-      start_time: startTime,
-      location,
-      status: 'upcoming',
-      created_by: user.id
-    }, { 
-      onConflict: 'church_id,service_type,event_date,start_time' 
+    .select('id, church_id, status')
+    .eq('id', eventId)
+    .maybeSingle();
+  if (!event) throw new AuthError('Event not found.', 404);
+
+  // 1. Usher session scoped to this church (and this event's church).
+  const usher = await getUsherSession(slug);
+  if (usher && usher.church_id === event.church_id) {
+    // Ushers may only touch a service that is live right now.
+    if (event.status !== 'active') throw new AuthError('This service is not active.', 403);
+    return { admin, event, actor: `usher:${event.church_id}`, actorUserId: null as string | null, slug };
+  }
+
+  // 2. Logged-in admin of this church.
+  const { church, user } = await assertTenantAdmin(slug);
+  if (church.id !== event.church_id) throw new AuthError('You are not authorised for this service.', 403);
+  return { admin, event, actor: user.id, actorUserId: user.id, slug };
+}
+
+function revalidateAttendance(slug: string, eventId: string) {
+  revalidatePath(`/${slug}/usher/dashboard`);
+  revalidatePath(`/${slug}/admin/attendance`);
+  revalidatePath(`/${slug}/admin/attendance/${eventId}`);
+}
+
+const ATTENDANCE_STATUSES = ['present', 'late', 'absent', 'excused'] as const;
+
+export async function markAttendance(
+  churchSlug: string,
+  eventId: string,
+  memberId: string,
+  status: 'present' | 'late' | 'absent' | 'excused' = 'present',
+): R {
+  try {
+    if (!isUuid(memberId) || !(ATTENDANCE_STATUSES as readonly string[]).includes(status)) return { error: 'Invalid request.' };
+    const { admin, event, actorUserId, slug } = await authorizeCheckIn(churchSlug, eventId);
+    if (!(await rateLimit(`checkin:${event.church_id}`, 600, 60, { failClosed: false }))) {
+      return { error: 'Too many check-ins. Slow down a moment.' };
+    }
+
+    // Single transaction: tenant-consistency check, upsert, and count update.
+    const { error } = await admin.schema('church').rpc('set_attendance', {
+      p_event_id: eventId,
+      p_member_id: memberId,
+      p_status: status,
+      p_recorded_by: actorUserId,
     });
-
-  if (error) {
-    console.error('Error creating event:', error);
-    // If we get an RLS error, it usually manifests as a 42501 or just a generic failure
-    return { error: error.message || 'Failed to create event. This might be due to a unique constraint or RLS policy.' };
-  }
-
-  revalidatePath(`/${churchSlug}/admin/attendance`);
-  return { success: true };
-}
-
-export async function updateEventStatus(eventId: string, status: 'upcoming' | 'active' | 'completed', churchSlug: string) {
-  try {
-    const supabase = await createClient();
-    
-    // Auto-mark absentees when an event is finalized
-    if (status === 'completed') {
-      const adminClient = await createAdminClient();
-      const { data: event } = await adminClient.schema('church').from('events').select('church_id').eq('id', eventId).single();
-      
-      if (event) {
-        const { data: allMembers } = await adminClient.schema('church').from('members').select('id').eq('church_id', event.church_id).eq('status', 'active');
-        const { data: logs } = await adminClient.schema('church').from('attendance_logs').select('member_id').eq('event_id', eventId);
-        
-        if (allMembers && logs) {
-          const attendedIds = new Set(logs.map(l => l.member_id));
-          const absentMembers = allMembers.filter(m => !attendedIds.has(m.id));
-          
-          if (absentMembers.length > 0) {
-            const absentLogs = absentMembers.map(m => ({
-              church_id: event.church_id,
-              event_id: eventId,
-              member_id: m.id,
-              attendance_status: 'absent'
-            }));
-            
-            // Use upsert to be safe and avoid unique constraint conflicts
-            const { error: insertError } = await adminClient
-              .schema('church')
-              .from('attendance_logs')
-              .upsert(absentLogs, { onConflict: 'member_id,event_id' });
-
-            if (insertError) {
-              console.error('[updateEventStatus] Failed to auto-mark absentees:', insertError);
-            }
-          }
-        }
-      }
-    }
-
-    const { error } = await supabase
-      .schema('church')
-      .from('events')
-      .update({ status })
-      .eq('id', eventId);
-
-    if (error) return { error: error.message };
-    
-    revalidatePath(`/${churchSlug}/admin/attendance`);
-    revalidatePath(`/${churchSlug}/admin/attendance/${eventId}`);
-    revalidatePath(`/${churchSlug}/usher/dashboard`);
-    return { success: true };
-  } catch (error) {
-    return { error: 'A network or server error occurred.' };
-  }
-}
-
-export async function claimAdminAccess(churchId: string, churchSlug: string) {
-  try {
-    const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-    
-    if (!user) return { error: 'Not authenticated' };
-    
-    const adminSupabase = await createAdminClient();
-    const { error } = await adminSupabase.from('admin_profiles').upsert({
-      id: user.id,
-      tenant_id: churchId,
-      email: user.email,
-      role: 'pastor',
-      full_name: user.user_metadata?.full_name || user.email?.split('@')[0] || 'Admin'
-    });
-
-    if (error) return { error: error.message };
-
-    revalidatePath(`/${churchSlug}/admin/attendance`);
-    return { success: true };
-  } catch (error) {
-    return { error: 'Failed to claim access.' };
-  }
-}
-
-export async function updateChurchPasskey(churchId: string, newPasskey: string, churchSlug: string) {
-  try {
-    const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-    
-    if (!user) return { error: 'Not authenticated' };
-
-    // Verify Admin Access
-    const { data: profile } = await supabase
-      .from('admin_profiles')
-      .select('tenant_id')
-      .eq('id', user.id)
-      .eq('tenant_id', churchId)
-      .maybeSingle();
-
-    if (!profile) return { error: 'Access denied' };
-
-    const adminSupabase = await createAdminClient();
-    const { error } = await adminSupabase
-      .schema('church')
-      .from('churches')
-      .update({ passkey: newPasskey })
-      .eq('id', churchId);
-
     if (error) {
-      console.error('[updateChurchPasskey] Error:', error);
-      return { error: error.message };
+      console.error('[markAttendance] rpc failed:', error.code, error.message);
+      return { error: /does not belong/i.test(error.message) ? 'Member not found.' : 'Failed to record check-in.' };
     }
 
-    revalidatePath(`/${churchSlug}/admin/attendance`);
+    revalidateAttendance(slug, eventId);
     return { success: true };
-  } catch (error) {
-    console.error('[updateChurchPasskey] Unexpected error:', error);
-    return { error: 'Failed to update passkey.' };
+  } catch (err) {
+    return failure(err, 'Failed to record check-in.');
   }
 }
 
-export async function getEventAttendanceData(churchSlug: string, eventId: string) {
+export async function removeAttendance(churchSlug: string, eventId: string, memberId: string): R {
   try {
-    const supabase = await createClient();
+    if (!isUuid(memberId)) return { error: 'Invalid request.' };
+    const { admin, event, slug } = await authorizeCheckIn(churchSlug, eventId);
 
-    // Fetch church first so we have the ID for the members query
-    const { data: church } = await supabase
-      .schema('church')
-      .from('churches')
-      .select('id, passkey, name')
-      .eq('slug', churchSlug)
-      .single();
+    // Tenant scope: the member must belong to the event's church.
+    const { data: member } = await admin.schema('church').from('members').select('id').eq('id', memberId).eq('church_id', event.church_id).maybeSingle();
+    if (!member) return { error: 'Member not found.' };
 
-    if (!church) return { error: 'Church not found.' };
-
-    // Now run event and attendance queries in parallel using the resolved church ID
-    const [eventResult, logsResult, membersResult] = await Promise.all([
-      supabase.schema('church').from('events').select('*').eq('id', eventId).single(),
-      supabase.schema('church').from('attendance_logs').select('member_id').eq('event_id', eventId).in('attendance_status', ['present', 'late']),
-      supabase.schema('church').from('members').select('id, full_name, phone_number').eq('church_id', church.id).order('full_name')
-    ]);
-
-    const { data: event } = eventResult;
-    const { data: logs } = logsResult;
-    const { data: members } = membersResult;
-
-    return { 
-      church, 
-      event, 
-      members: members || [], 
-      attendedMemberIds: logs?.map(l => l.member_id) || [] 
-    };
-  } catch (error) {
-    console.error('[getEventAttendanceData] Error:', error);
-    return { error: 'Failed to verify access.' };
-  }
-}
-
-async function checkAuthorization(churchSlug: string, eventId: string) {
-  const adminClient = await createAdminClient();
-  const { data: event } = await adminClient.schema('church').from('events').select('church_id').eq('id', eventId).single();
-  
-  if (!event) {
-    throw new Error('Event not found.');
-  }
-  
-  // 1. Is there an usher session for this church?
-  // We use ilike or normalize to lowercase to match the cookie name logic
-  const usherSession = await getUsherSession(churchSlug.toLowerCase());
-  if (usherSession && usherSession.church_slug === churchSlug.toLowerCase() && usherSession.church_id === event.church_id) {
-    return { adminClient, allowed: true };
-  }
-
-  // 2. Is there a logged-in admin for this church?
-  const client = await createClient();
-  const { data: { user } } = await client.auth.getUser();
-
-  if (user) {
-      const { data: profile } = await adminClient.from('admin_profiles').select('tenant_id').eq('id', user.id).maybeSingle();
-      if (profile && profile.tenant_id === event.church_id) {
-         return { adminClient, allowed: true };
-      }
-    }
-
-  throw new Error('Unauthorized to modify this event.');
-}
-
-export async function markAttendance(churchSlug: string, eventId: string, memberId: string, status: 'present' | 'late' | 'absent' | 'excused' = 'present') {
-  try {
-    console.log(`[markAttendance] Marking ${memberId} as ${status} for event ${eventId} (Slug: ${churchSlug})`);
-    const { adminClient: supabase } = await checkAuthorization(churchSlug, eventId);
-    
-    // 1. Get the church_id from the event first
-    const { data: eventData, error: eventError } = await supabase
-      .schema('church')
-      .from('events')
-      .select('church_id')
-      .eq('id', eventId)
-      .single();
-
-    if (eventError || !eventData) {
-      throw new Error('Could not find event details.');
-    }
-
-    // 2. Direct upsert into attendance_logs using Admin Client (bypasses RLS)
-    const { data: existingLog } = await supabase
-      .schema('church')
-      .from('attendance_logs')
-      .select('attendance_status')
-      .eq('member_id', memberId)
-      .eq('event_id', eventId)
-      .maybeSingle();
-
-    const { error } = await supabase
-      .schema('church')
-      .from('attendance_logs')
-      .upsert({
-        church_id: eventData.church_id,
-        member_id: memberId,
-        event_id: eventId,
-        attendance_status: status,
-        check_in_time: new Date().toISOString()
-      }, { onConflict: 'member_id,event_id' });
-
+    const { error } = await admin.schema('church').rpc('clear_attendance', { p_event_id: eventId, p_member_id: memberId });
     if (error) {
-      console.error('[markAttendance] Upsert Error:', error);
-      return { error: `Database error: ${error.message}` };
+      console.error('[removeAttendance] rpc failed:', error.code, error.message);
+      return { error: 'Failed to remove check-in.' };
     }
-
-    // 3. Update the attendance count intelligently
-    const wasPresent = existingLog?.attendance_status === 'present' || existingLog?.attendance_status === 'late';
-    const isPresent = status === 'present' || status === 'late';
-
-    if (!wasPresent && isPresent) {
-      await supabase.schema('church').rpc('increment_event_attendance', { event_id: eventId });
-    } else if (wasPresent && !isPresent) {
-      await supabase.schema('church').rpc('decrement_event_attendance', { event_id: eventId });
-    }
-
-    revalidatePath(`/${churchSlug}/usher/dashboard`);
-    revalidatePath(`/${churchSlug}/admin/attendance`);
-    revalidatePath(`/${churchSlug}/admin/attendance/${eventId}`);
+    revalidateAttendance(slug, eventId);
     return { success: true };
-  } catch (error: any) {
-    console.error('[markAttendance] Exception:', error);
-    return { error: error.message || 'Failed to record check-in.' };
+  } catch (err) {
+    return failure(err, 'Failed to remove check-in.');
   }
 }
 
-export async function removeAttendance(churchSlug: string, eventId: string, memberId: string) {
+// ── Inactivity / follow-up flags ────────────────────────────────────────────
+
+export async function runInactivityDetection(churchId: string, churchSlug: string): R<{ count?: unknown }> {
   try {
-    const { adminClient: supabase } = await checkAuthorization(churchSlug, eventId);
-    
-    // 1. Get event data to verify tenant scope
-    const { data: eventData } = await supabase
-      .schema('church')
-      .from('events')
-      .select('church_id')
-      .eq('id', eventId)
-      .single();
+    const { church, supabase } = await assertTenantAdmin(churchSlug);
+    if (churchId !== church.id) return { error: 'Access denied.' };
+    if (!(await rateLimit(`inactivity:${church.id}`, 12, 60 * 60))) return { error: 'Please wait before refreshing again.' };
 
-    if (!eventData) throw new Error('Event not found');
-
-    // 2. Direct delete from attendance_logs using Admin Client (bypasses RLS)
-    // We include church_id for extra safety in multi-tenant environment
-    const { error } = await supabase
-      .schema('church')
-      .from('attendance_logs')
-      .delete()
-      .match({ 
-        member_id: memberId, 
-        event_id: eventId,
-        church_id: eventData.church_id 
-      });
-
+    // Runs as the user: the SQL function itself rejects any other tenant.
+    const { data, error } = await supabase.schema('church').rpc('refresh_inactive_30_days', { p_church_id: church.id });
     if (error) {
-      console.error('[removeAttendance] Delete Error:', error);
-      return { error: `Database error: ${error.message}` };
+      console.error('[runInactivityDetection] failed:', error.code, error.message);
+      return { error: 'Failed to refresh alerts.' };
     }
-
-    // 3. Update the attendance count using the RPC
-    await supabase.schema('church').rpc('decrement_event_attendance', { event_id: eventId });
-
-    revalidatePath(`/${churchSlug}/usher/dashboard`);
-    revalidatePath(`/${churchSlug}/admin/attendance`);
-    revalidatePath(`/${churchSlug}/admin/attendance/${eventId}`);
-    
-    return { success: true };
-  } catch (error: any) {
-    console.error('[removeAttendance] Exception:', error);
-    return { error: error.message || 'Failed to remove check-in.' };
+    revalidatePath(`/${church.slug}/admin/attendance`);
+    return { success: true, count: data };
+  } catch (err) {
+    return failure(err, 'Failed to refresh alerts.');
   }
-}
-
-export async function runInactivityDetection(churchId: string, churchSlug: string) {
-  const supabase = await createClient();
-  const { data, error } = await supabase
-    .schema('church')
-    .rpc('refresh_inactive_30_days', { p_church_id: churchId });
-
-  if (error) return { error: error.message };
-  
-  revalidatePath(`/${churchSlug}/admin/attendance`);
-  return { success: true, count: data };
 }
 
 export async function getAttendanceFlags(churchId: string) {
-  const supabase = await createClient();
-  const { data, error } = await supabase
+  const ctx = await getTenantAdminForChurchId(churchId);
+  if (!ctx) return { error: 'Access denied.' };
+
+  const { data, error } = await ctx.supabase
     .schema('church')
     .from('attendance_flags')
-    .select(`
-      *,
-      members:member_id (
-        full_name,
-        phone_number
-      )
-    `)
-    .eq('church_id', churchId)
+    .select('id, member_id, flag_type, status, notes, created_at, members:member_id ( full_name, phone_number )')
+    .eq('church_id', ctx.churchId)
     .in('status', ['open', 'followed_up'])
-    .order('created_at', { ascending: false });
+    .order('created_at', { ascending: false })
+    .limit(500);
 
-  if (error) return { error: error.message };
+  if (error) {
+    console.error('[getAttendanceFlags] failed:', error.code, error.message);
+    return { error: 'Failed to load alerts.' };
+  }
   return { data };
 }
 
-export async function updateAttendanceFlagStatus(flagId: string, status: AttendanceFlagStatus, churchSlug: string) {
-  const supabase = await createClient();
-  const { error } = await supabase
-    .schema('church')
-    .from('attendance_flags')
-    .update({ status })
-    .eq('id', flagId);
+const FLAG_STATUSES: AttendanceFlagStatus[] = ['open', 'followed_up', 'resolved'];
 
-  if (error) return { error: error.message };
-  
-  revalidatePath(`/${churchSlug}/admin/attendance`);
-  return { success: true };
-}
-
-export async function sendMissedYouMessages(churchId: string, churchSlug: string, eventId?: string, customMessage?: string) {
+export async function updateAttendanceFlagStatus(flagId: string, status: AttendanceFlagStatus, churchSlug: string): R {
   try {
-    const supabase = await createClient();
-    const { data: { session } } = await supabase.auth.getSession();
-    
-    if (!session) {
-      return { error: 'Not authenticated' };
-    }
-
-    // Sync the 3 consecutive Sundays missed flags by calling the deployed edge function
-    try {
-      await supabase.functions.invoke('sync_missed_3_sundays_flags', {
-        method: 'POST'
-      });
-    } catch (e) {
-      console.error('Failed to invoke edge function:', e);
-    }
-
-    const memberIdsToMessage = new Set<string>();
-    
-    // If no eventId provided, try to find the most recent completed event from the last 7 days
-    let targetEventId = eventId;
-    if (!targetEventId) {
-      const { data: latestEvent } = await supabase
-        .schema('church')
-        .from('events')
-        .select('id')
-        .eq('church_id', churchId)
-        .eq('status', 'completed')
-        .order('event_date', { ascending: false })
-        .limit(1)
-        .maybeSingle();
-      
-      if (latestEvent) {
-        targetEventId = latestEvent.id;
-      }
-    }
-    
-    // Fetch members who were absent for the target event
-    if (targetEventId) {
-      const { data: absentLogs, error: absentError } = await supabase
-        .schema('church')
-        .from('attendance_logs')
-        .select('member_id')
-        .eq('event_id', targetEventId)
-        .eq('attendance_status', 'absent');
-
-      if (absentError) return { error: absentError.message };
-      if (absentLogs) {
-        absentLogs.forEach(log => memberIdsToMessage.add(log.member_id));
-      }
-    }
-
-    // Fetch members who have an active 'missed_3_sundays' flag
-    const { data: openFlags, error: flagsError } = await supabase
+    if (!isUuid(flagId) || !FLAG_STATUSES.includes(status)) return { error: 'Invalid request.' };
+    const { church, supabase } = await assertTenantAdmin(churchSlug);
+    const { data, error } = await supabase
       .schema('church')
       .from('attendance_flags')
-      .select('id, member_id')
-      .eq('church_id', churchId)
-      .eq('flag_type', 'missed_3_sundays')
-      .eq('status', 'open');
+      .update({ status })
+      .eq('id', flagId)
+      .eq('church_id', church.id)
+      .select('id');
+    if (error) throw new Error(error.message);
+    if (!data?.length) return { error: 'Alert not found.' };
 
-    if (flagsError) return { error: flagsError.message };
+    revalidatePath(`/${church.slug}/admin/attendance`);
+    return { success: true };
+  } catch (err) {
+    return failure(err, 'Failed to update alert.');
+  }
+}
 
-    // Fetch members who were PRESENT for the target event to EXCLUDE them
-    const presentMemberIds = new Set<string>();
+// ── "We missed you" messages (queued, not sent inline) ──────────────────────
+
+const DEFAULT_MISSED_TEMPLATE =
+  'Hello {first_name}! We missed you at church. We pray you are well and hope to see you again soon. Blessings from your church family.';
+
+function chunk<T>(arr: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
+export async function sendMissedYouMessages(churchId: string, churchSlug: string, eventId?: string, customMessage?: string): R<{ count?: number }> {
+  try {
+    const { church, supabase, user } = await assertTenantAdmin(churchSlug);
+    if (churchId !== church.id) return { error: 'Access denied.' };
+    if (eventId !== undefined && !isUuid(eventId)) return { error: 'Invalid request.' };
+
+    const template = (customMessage ?? '').trim() || DEFAULT_MISSED_TEMPLATE;
+    if (template.length > 480) return { error: 'Message is too long (max 480 characters).' };
+    if (!(await rateLimit(`missed:${church.id}`, 6, 60 * 60))) return { error: 'Too many bulk sends. Try again later.' };
+
+    // Best effort: refresh "missed 3 Sundays" flags (deployed edge function).
+    try {
+      await supabase.functions.invoke('sync_missed_3_sundays_flags', { method: 'POST' });
+    } catch (e) {
+      console.error('[sendMissedYouMessages] flag sync failed:', (e as Error).message);
+    }
+
+    // Target event: explicit, else the latest completed one — always inside this church.
+    let targetEventId = eventId;
+    if (!targetEventId) {
+      const { data: latest } = await supabase
+        .schema('church').from('events').select('id')
+        .eq('church_id', church.id).eq('status', 'completed')
+        .order('event_date', { ascending: false }).limit(1).maybeSingle();
+      targetEventId = latest?.id;
+    } else {
+      const { data: ev } = await supabase.schema('church').from('events').select('id').eq('id', targetEventId).eq('church_id', church.id).maybeSingle();
+      if (!ev) return { error: 'Event not found.' };
+    }
+
+    const toMessage = new Set<string>();
+    const present = new Set<string>();
     if (targetEventId) {
-      const { data: presentLogs } = await supabase
-        .schema('church')
-        .from('attendance_logs')
-        .select('member_id')
-        .eq('event_id', targetEventId)
-        .in('attendance_status', ['present', 'late']);
-      
-      if (presentLogs) {
-        presentLogs.forEach(log => presentMemberIds.add(log.member_id));
+      const { data: logs, error } = await supabase
+        .schema('church').from('attendance_logs').select('member_id, attendance_status')
+        .eq('church_id', church.id).eq('event_id', targetEventId)
+        .in('attendance_status', ['absent', 'present', 'late']);
+      if (error) throw new Error(error.message);
+      for (const l of logs ?? []) {
+        if (l.attendance_status === 'absent') toMessage.add(l.member_id);
+        else present.add(l.member_id);
       }
     }
 
-    // Add flagged members, but ONLY if they weren't present at the current event
-    const flagsByMemberId = new Map<string, string>(); // member_id -> flag_id
-    if (openFlags) {
-      openFlags.forEach(flag => {
-        if (!presentMemberIds.has(flag.member_id)) {
-          memberIdsToMessage.add(flag.member_id);
-          flagsByMemberId.set(flag.member_id, flag.id);
-        }
-      });
+    const { data: openFlags, error: flagsError } = await supabase
+      .schema('church').from('attendance_flags').select('id, member_id')
+      .eq('church_id', church.id).eq('flag_type', 'missed_3_sundays').eq('status', 'open');
+    if (flagsError) throw new Error(flagsError.message);
+
+    const flagIds: string[] = [];
+    for (const f of openFlags ?? []) {
+      if (!present.has(f.member_id)) {
+        toMessage.add(f.member_id);
+        flagIds.push(f.id);
+      }
     }
+    if (toMessage.size === 0) return { success: true, count: 0 };
 
-    if (memberIdsToMessage.size === 0) {
-      return { success: true, count: 0 };
+    const members: { id: string; full_name: string; phone_number: string | null }[] = [];
+    for (const ids of chunk([...toMessage], 100)) {
+      const { data, error } = await supabase
+        .schema('church').from('members').select('id, full_name, phone_number')
+        .eq('church_id', church.id).in('id', ids);
+      if (error) throw new Error(error.message);
+      members.push(...(data ?? []));
     }
+    const recipients = members.filter((m) => !!m.phone_number).map((m) => ({ id: m.id, full_name: m.full_name, phone_number: m.phone_number as string }));
+    if (recipients.length === 0) return { success: true, count: 0 };
 
-    const memberIds = Array.from(memberIdsToMessage);
+    // Cheap pre-flight; the authoritative check is the atomic per-message debit.
+    const { data: wallet } = await supabase.schema('public').from('wallets').select('balance, sms_rate').eq('tenant_id', church.id).maybeSingle();
+    if (!wallet) return { error: 'Billing account not found.' };
+    if (wallet.balance < wallet.sms_rate) return { error: 'Insufficient SMS balance. Please top up.' };
 
-    // Fetch the actual members to get phone_number and full_name
-    const { data: members, error: membersError } = await supabase
-      .schema('church')
-      .from('members')
-      .select('id, full_name, phone_number')
-      .in('id', memberIds);
-
-    if (membersError) return { error: membersError.message };
-    if (!members || members.length === 0) return { success: true, count: 0 };
-
-    // Get church config and balance once
-    const { data: church } = await supabase
-      .schema('church')
-      .from('churches')
-      .select('sender_id')
-      .eq('id', churchId)
-      .maybeSingle();
-
-    const { data: balance } = await supabase
-      .schema('public')
-      .from('wallets')
-      .select('balance, sms_rate')
-      .eq('tenant_id', churchId)
-      .maybeSingle();
-
-    if (!balance) return { error: 'Billing account not found' };
-
+    const { data: row } = await supabase.schema('church').from('churches').select('sender_id').eq('id', church.id).maybeSingle();
     const isSandbox = process.env.AT_USERNAME?.toLowerCase() === 'sandbox';
-    const senderId = (!isSandbox && church?.sender_id) ? church.sender_id.trim() : '';
+    const senderId = !isSandbox && row?.sender_id ? String(row.sender_id).trim() : '';
 
-    let sentCount = 0;
+    const { enqueued } = await enqueueBroadcast({
+      tenantId: church.id,
+      message: template,
+      audience: 'missed_you',
+      senderId,
+      recipients,
+      createdBy: user.id,
+    });
 
-    for (const member of members) {
-      if (!member.phone_number) continue;
-
-      // Re-fetch balance from DB each iteration to avoid stale reads from concurrent deductions
-      const { data: freshBalance } = await supabase
-        .schema('public')
-        .from('wallets')
-        .select('balance, sms_rate')
-        .eq('tenant_id', churchId)
-        .maybeSingle();
-
-      if (!freshBalance || freshBalance.balance < freshBalance.sms_rate) {
-        console.warn('[sendMissedYouMessages] Halted: Insufficient balance');
-        break;
+    // Close follow-up flags for everyone we just queued a message for.
+    if (flagIds.length) {
+      const queuedIds = new Set(recipients.map((r) => r.id));
+      const done = (openFlags ?? []).filter((f) => queuedIds.has(f.member_id)).map((f) => f.id);
+      for (const ids of chunk(done, 100)) {
+        await supabase.schema('church').from('attendance_flags').update({ status: 'followed_up' }).eq('church_id', church.id).in('id', ids);
       }
-
-      const firstName = member.full_name.split(' ')[0] || 'there';
-      const defaultMessage = `Hello ${firstName}! we missed you  at church today. We pray you are well and hope to see you again next time. Blessings from your church family.`;
-      
-      const message = customMessage 
-        ? customMessage.replace(/{name}/gi, member.full_name).replace(/{first_name}/gi, firstName)
-        : defaultMessage;
-      
-      try {
-        const result = await sendSingleSMS({
-          supabase,
-          phoneNumber: member.phone_number,
-          message,
-          churchId,
-          idempotencyKey: `missed_${churchId.slice(0, 8)}_${member.id}_${Date.now()}`,
-          senderId,
-          balance: freshBalance
-        });
-
-        if (result.success) {
-          sentCount++;
-          // Close the flag if they had one
-          const flagId = flagsByMemberId.get(member.id);
-          if (flagId) {
-            await supabase
-              .schema('church')
-              .from('attendance_flags')
-              .update({ status: 'followed_up' })
-              .eq('id', flagId);
-          }
-        }
-      } catch (err) {
-        console.error(`Failed to send SMS to ${member.phone_number}:`, err);
-      }
-      
-      // Small delay to avoid hitting AT rate limits
-      await new Promise(r => setTimeout(r, 100));
     }
 
-    return { success: true, count: sentCount };
-  } catch (error) {
-    console.error('sendMissedYouMessages Error:', error);
-    return { error: 'Failed to send messages.' };
+    await audit('missed_you.enqueued', { tenantId: church.id, actor: user.id, meta: { count: enqueued } });
+
+    // Deliver after the response is sent (no inline loop inside the request).
+    after(async () => {
+      try {
+        await processQueueBatch({ tenantId: church.id, batchSize: 15 });
+      } catch (e) {
+        console.error('[sendMissedYouMessages] background processing failed:', (e as Error).message);
+      }
+    });
+
+    revalidatePath(`/${church.slug}/admin/attendance`);
+    return { success: true, count: enqueued };
+  } catch (err) {
+    return failure(err, 'Failed to queue messages.');
   }
 }

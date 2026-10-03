@@ -1,238 +1,159 @@
 'use server';
 
-import { createClient, createAdminClient } from '@/lib/supabase/server';
 import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
+import { assertTenantAdmin, AuthError } from '@/lib/auth/tenant';
 import { normalizeUgPhone } from '@/lib/utils';
+import {
+  field, slugField, uuidField, cleanDate, cleanEmail, cleanGender, text, boolish, checkBulk,
+  isRedirectError, GENERIC_SAVE_ERROR,
+} from '@/lib/form-utils';
 
-async function checkChurchAdminAuth(churchSlug: string) {
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) throw new Error('Unauthenticated');
+function back(slug: string | null, path: string, error: string): never {
+  const q = new URLSearchParams({ error }).toString();
+  redirect(slug ? `/${slug}/admin/${path}?${q}` : `/?${q}`);
+}
 
-  const adminSupabase = await createAdminClient();
-  const { data: church } = await adminSupabase.schema('church').from('churches').select('id').eq('slug', churchSlug).single();
-  if (!church) throw new Error('Church not found');
-
-  const { data: profile } = await adminSupabase.from('admin_profiles').select('tenant_id').eq('id', user.id).eq('tenant_id', church.id).single();
-  if (!profile) throw new Error('Unauthorized to perform this action for this church');
-
-  return { supabase, user, churchId: church.id };
+function describe(err: unknown, fallback: string): string {
+  return err instanceof AuthError ? err.message : fallback;
 }
 
 export async function addMember(formData: FormData) {
-  let churchSlug = formData.get('churchSlug') as string;
-  let searchParams = '';
+  const slug = slugField(formData);
+  let error = '';
 
   try {
-    const { supabase, user, churchId: finalChurchId } = await checkChurchAdminAuth(churchSlug);
-    
-    const firstName = formData.get('firstName') as string;
-    const lastName = formData.get('lastName') as string;
-    const fullName = `${firstName} ${lastName}`.trim();
-    const phone = formData.get('phone') as string;
-    const email = formData.get('email') as string;
-    const gender = formData.get('gender') as string;
-    const birthday = formData.get('birthday') as string;
-    const isYouth = formData.get('isYouth') === 'true';
-      let formattedPhone = null;
-      if (phone) {
-        formattedPhone = normalizeUgPhone(phone);
-        if (!formattedPhone) {
-          searchParams = new URLSearchParams({ error: 'Invalid phone number format. Please enter a valid Ugandan number.' }).toString();
-          redirect(`/${churchSlug}/admin/members?${searchParams}`);
-        }
+    const { supabase, church } = await assertTenantAdmin(slug ?? '');
+
+    const fullName = `${field(formData, 'firstName', 60)} ${field(formData, 'lastName', 60)}`.trim();
+    if (!fullName) back(church.slug, 'members', 'Name is required.');
+
+    const phone = field(formData, 'phone', 32);
+    let formattedPhone: string | null = null;
+    if (phone) {
+      formattedPhone = normalizeUgPhone(phone);
+      if (!formattedPhone) back(church.slug, 'members', 'Invalid phone number format. Please enter a valid Ugandan number.');
+    }
+
+    // Silently skip duplicates (existing behaviour): same phone already a member or convert.
+    let duplicate = false;
+    if (formattedPhone) {
+      const [{ data: m }, { data: c }] = await Promise.all([
+        supabase.schema('church').from('members').select('id').eq('church_id', church.id).eq('phone_number', formattedPhone).limit(1).maybeSingle(),
+        supabase.schema('church').from('new_converts').select('id').eq('church_id', church.id).eq('contact', formattedPhone).limit(1).maybeSingle(),
+      ]);
+      duplicate = !!(m || c);
+    }
+
+    if (!duplicate) {
+      const { error: dbErr } = await supabase.schema('church').from('members').insert({
+        church_id: church.id,
+        full_name: fullName,
+        phone_number: formattedPhone || '', // column is NOT NULL in some deployments
+        email: cleanEmail(formData.get('email')),
+        gender: cleanGender(formData.get('gender')),
+        birthday: cleanDate(formData.get('birthday')),
+        is_youth: formData.get('isYouth') === 'true',
+        status: 'active',
+      });
+      if (dbErr) {
+        console.error('[members] insert failed:', dbErr.code);
+        error = GENERIC_SAVE_ERROR;
       }
-
-      let hasConflict = false;
-      if (formattedPhone) {
-        // Check if phone number already exists in members
-        const { data: existingMember } = await supabase
-          .schema('church')
-          .from('members')
-          .select('id')
-          .eq('church_id', finalChurchId)
-          .eq('phone_number', formattedPhone)
-          .maybeSingle();
-
-        if (existingMember) {
-          hasConflict = true;
-          // Silently ignore to avoid showing an error message as requested
-        }
-
-        if (!hasConflict) {
-          // Check if phone number already exists in new_converts
-          const { data: existingConvert } = await supabase
-            .schema('church')
-            .from('new_converts')
-            .select('id')
-            .eq('church_id', finalChurchId)
-            .eq('contact', formattedPhone)
-            .maybeSingle();
-          
-          if (existingConvert) {
-            hasConflict = true;
-            // Silently ignore
-          }
-        }
-      }
-
-      if (!hasConflict) {
-        const payload = {
-          church_id: finalChurchId,
-          full_name: fullName,
-          phone_number: formattedPhone || '', // Use empty string instead of null to bypass NOT NULL constraints if empty
-          email: email || null,
-          gender: gender ? gender.toLowerCase() : null,
-          birthday: birthday || null,
-          is_youth: isYouth,
-          status: 'active'
-        };
-
-        console.log('--- INSERTING NEW MEMBER ---', payload);
-        console.log('User Role/Metadata payload:', user?.user_metadata);
-
-        const { error } = await supabase
-          .schema('church')
-          .from('members')
-          .insert(payload);
-
-        if (error) {
-           console.error('Error adding member:', error);
-           searchParams = new URLSearchParams({
-             error: `DB Insert Error: ${error.message}${error.details ? ` (${error.details})` : ''}`,
-           }).toString();
-        }
-      }
-  } catch (err: any) {
-      console.error('Unhandled exception in addMember:', err);
-      // Do not swallow NEXT_REDIRECT
-      if (err.message === 'NEXT_REDIRECT') {
-        throw err;
-      }
-      searchParams = new URLSearchParams({ error: 'Failed to add member due to application error.' }).toString();
+    }
+    if (!error) revalidatePath(`/${church.slug}/admin/members`);
+  } catch (err) {
+    if (isRedirectError(err)) throw err;
+    console.error('[members] addMember failed:', (err as Error).message);
+    error = describe(err, 'Failed to add member.');
   }
 
-  if (searchParams) {
-    redirect(`/${churchSlug}/admin/members?${searchParams}`);
-  }
-
-  revalidatePath(`/${churchSlug}/admin/members`);
+  if (error) back(slug, 'members', error);
 }
 
 export async function editMember(formData: FormData) {
-  let churchSlug = formData.get('churchSlug') as string;
-  let memberId = formData.get('memberId') as string;
-  let searchParams = '';
+  const slug = slugField(formData);
+  const memberId = uuidField(formData, 'memberId');
+  let error = '';
 
   try {
-    const { supabase, churchId: finalChurchId } = await checkChurchAdminAuth(churchSlug);
-    
-    const firstName = formData.get('firstName') as string;
-    const lastName = formData.get('lastName') as string;
-    const fullName = `${firstName} ${lastName}`.trim();
-    const phone = formData.get('phone') as string;
-    const gender = formData.get('gender') as string;
-    const birthday = formData.get('birthday') as string;
-    const isYouth = formData.get('isYouth') === 'true';
+    const { supabase, church } = await assertTenantAdmin(slug ?? '');
+    if (!memberId) back(church.slug, 'members', 'Invalid member.');
 
-    let formattedPhone = phone || '';
+    const fullName = `${field(formData, 'firstName', 60)} ${field(formData, 'lastName', 60)}`.trim();
+    if (!fullName) back(church.slug, `members/edit/${memberId}`, 'Name is required.');
+
+    const phone = field(formData, 'phone', 32);
+    let formattedPhone = '';
     if (phone) {
       const normalized = normalizeUgPhone(phone);
-      if (!normalized) {
-        searchParams = new URLSearchParams({ error: 'Invalid phone number format. Please enter a valid Ugandan number.' }).toString();
-        redirect(`/${churchSlug}/admin/members/edit/${memberId}?${searchParams}`);
-      }
-      formattedPhone = normalized!;
+      if (!normalized) back(church.slug, `members/edit/${memberId}`, 'Invalid phone number format. Please enter a valid Ugandan number.');
+      formattedPhone = normalized as string;
     }
 
-    const payload = {
-      full_name: fullName,
-      phone_number: formattedPhone || '',
-      gender: gender ? gender.toLowerCase() : null,
-      birthday: birthday || null,
-      is_youth: isYouth,
-    };
-
-    const { error } = await supabase
+    // Tenant-scoped: the id alone is never enough.
+    const { error: dbErr } = await supabase
       .schema('church')
       .from('members')
-      .update(payload)
-      .eq('id', memberId);
+      .update({
+        full_name: fullName,
+        phone_number: formattedPhone,
+        gender: cleanGender(formData.get('gender')),
+        birthday: cleanDate(formData.get('birthday')),
+        is_youth: formData.get('isYouth') === 'true',
+      })
+      .eq('id', memberId)
+      .eq('church_id', church.id);
 
-    if (error) {
-      console.error('Error updating member:', error);
-      searchParams = new URLSearchParams({
-        error: `DB Update Error: ${error.message}`,
-      }).toString();
+    if (dbErr) {
+      console.error('[members] update failed:', dbErr.code);
+      error = GENERIC_SAVE_ERROR;
+    } else {
+      revalidatePath(`/${church.slug}/admin/members`);
+      redirect(`/${church.slug}/admin/members`);
     }
-  } catch (err: any) {
-      console.error('Unhandled exception in editMember:', err);
-      if (err.message === 'NEXT_REDIRECT') {
-        throw err;
-      }
-      searchParams = new URLSearchParams({ error: 'Failed to update member.' }).toString();
+  } catch (err) {
+    if (isRedirectError(err)) throw err;
+    console.error('[members] editMember failed:', (err as Error).message);
+    error = describe(err, 'Failed to update member.');
   }
 
-  if (searchParams) {
-    redirect(`/${churchSlug}/admin/members/edit/${memberId}?${searchParams}`);
-  }
-
-  revalidatePath(`/${churchSlug}/admin/members`);
-  redirect(`/${churchSlug}/admin/members`);
+  if (error) back(slug, memberId ? `members/edit/${memberId}` : 'members', error);
 }
 
-export async function bulkAddMembers(churchSlug: string, membersData: any[]) {
+export async function bulkAddMembers(churchSlug: string, membersData: unknown[]) {
   try {
-    const { supabase, churchId: finalChurchId } = await checkChurchAdminAuth(churchSlug);
+    const bad = checkBulk(membersData);
+    if (bad) return { error: bad };
+    const { supabase, church } = await assertTenantAdmin(churchSlug);
 
-    const payload = membersData.map((member) => {
-       // Format phone if needed
-       let formattedPhone = member.phone || member.phone_number || member.phoneNumber || '';
-       if (formattedPhone) {
-         formattedPhone = normalizeUgPhone(String(formattedPhone)) ?? String(formattedPhone).trim();
-       }
-
-       let gender = member.gender ? String(member.gender).toLowerCase() : null;
-       if (gender !== 'male' && gender !== 'female') gender = null;
-       
-       let isYouth = member.is_youth || member.isYouth || member.youth || false;
-       if (typeof isYouth === 'string') isYouth = isYouth.toLowerCase() === 'true' || isYouth === '1' || isYouth.toLowerCase() === 'yes';
-
-       const firstName = member.first_name || member.firstName || '';
-       const lastName = member.last_name || member.lastName || '';
-       let fullName = member.full_name || member.fullName || member.name || '';
-       
-       if (!fullName && (firstName || lastName)) {
-         fullName = `${firstName} ${lastName}`.trim();
-       }
-
-       return {
-         church_id: finalChurchId,
-         full_name: fullName || 'Unknown',
-         phone_number: formattedPhone,
-         email: member.email || null,
-         gender,
-         birthday: member.birthday || member.dob || null,
-         is_youth: !!isYouth,
-         status: 'active'
-       };
+    const payload = (membersData as Record<string, unknown>[]).map((m) => {
+      const rawPhone = text(m.phone ?? m.phone_number ?? m.phoneNumber, 32) ?? '';
+      const phone = rawPhone ? normalizeUgPhone(rawPhone) ?? rawPhone : '';
+      const first = text(m.first_name ?? m.firstName, 60) ?? '';
+      const last = text(m.last_name ?? m.lastName, 60) ?? '';
+      const fullName = text(m.full_name ?? m.fullName ?? m.name, 120) ?? (`${first} ${last}`.trim() || 'Unknown');
+      return {
+        church_id: church.id,
+        full_name: fullName,
+        phone_number: phone,
+        email: cleanEmail(m.email),
+        gender: cleanGender(m.gender),
+        birthday: cleanDate(m.birthday ?? m.dob),
+        is_youth: boolish(m.is_youth ?? m.isYouth ?? m.youth),
+        status: 'active',
+      };
     });
 
-    const { error } = await supabase
-      .schema('church')
-      .from('members')
-      .insert(payload);
-
+    const { error } = await supabase.schema('church').from('members').insert(payload);
     if (error) {
-       console.error('Error in bulk insert:', error);
-       return { error: `DB Bulk Insert Error: ${error.message}` };
+      console.error('[members] bulk insert failed:', error.code);
+      return { error: GENERIC_SAVE_ERROR };
     }
-    
-    revalidatePath(`/${churchSlug}/admin/members`);
+    revalidatePath(`/${church.slug}/admin/members`);
     return { success: true };
-  } catch (err: any) {
-    console.error('Unhandled exception in bulkAddMembers:', err);
-    return { error: 'Failed to bulk-add members due to application error.' };
+  } catch (err) {
+    console.error('[members] bulkAddMembers failed:', (err as Error).message);
+    return { error: describe(err, 'Failed to import members.') };
   }
 }

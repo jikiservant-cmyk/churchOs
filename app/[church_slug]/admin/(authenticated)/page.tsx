@@ -1,5 +1,4 @@
-import { getChurchBySlug } from '@/lib/db';
-import { createAdminClient } from '@/lib/supabase/server';
+import { requireTenantAdmin } from '@/lib/auth/tenant';
 import { AdminCharts } from '@/components/AdminCharts';
 import DashboardGreeting from '@/components/DashboardGreeting';
 
@@ -8,16 +7,8 @@ export default async function AdminDashboard({
 }: {
   params: Promise<{ church_slug: string }>;
 }) {
-  const resolvedParams = await params;
-  const church = await getChurchBySlug(resolvedParams.church_slug) || {
-    id: 'unknown',
-    name: resolvedParams.church_slug,
-    slug: resolvedParams.church_slug,
-    themeColor: 'bg-slate-90',
-    logoUrl: `https://picsum.photos/seed/${resolvedParams.church_slug}/200/200`
-  };
-
-  const supabase = await createAdminClient();
+  const { church_slug } = await params;
+  const { church, supabase } = await requireTenantAdmin(church_slug);
 
   // Optimized Parallel Data Fetching
   const [userResult, memberCountResult, recentMembersResult, eventsResult, prayersResult, demographicsResult, convertsResult, donationsResult, lastMonthMembersResult, recentAttendanceResult, memberGrowthResult, allLogsResult, visitorCountResult, lastMonthVisitorsResult, recentVisitorsResult] = await Promise.all([

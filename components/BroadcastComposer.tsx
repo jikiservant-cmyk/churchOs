@@ -2,7 +2,6 @@
 
 import { useState, useRef, useMemo, useEffect } from 'react';
 import { Send, AlertCircle, Loader2, CheckCircle2, User, UserCheck, UserPlus, Search, CheckSquare, Square } from 'lucide-react';
-import { normalizeUgPhone } from '@/lib/utils';
 import { useRouter } from 'next/navigation';
 
 export default function BroadcastComposer({ members, churchId }: { 
@@ -22,6 +21,8 @@ export default function BroadcastComposer({ members, churchId }: {
   const [isListExpanded, setIsListExpanded] = useState(false);
   
   const sendingRef = useRef(false);
+  // One id per composed message: a double-submit cannot send/charge twice.
+  const batchIdRef = useRef<string>(crypto.randomUUID());
   const router = useRouter();
 
   // Filter members based on group audience first
@@ -46,8 +47,7 @@ export default function BroadcastComposer({ members, churchId }: {
     if (!searchQuery.trim()) return groupFilteredMembers;
     const query = searchQuery.toLowerCase();
     return groupFilteredMembers.filter(m => 
-      m.full_name.toLowerCase().includes(query) || 
-      m.phone_number.includes(query)
+      m.full_name.toLowerCase().includes(query)
     );
   }, [groupFilteredMembers, searchQuery]);
 
@@ -105,12 +105,8 @@ export default function BroadcastComposer({ members, churchId }: {
         body: JSON.stringify({
           message,
           churchId,
-          recipients: finalMembers
-            .map(m => ({
-              full_name: m.full_name,
-              phone_number: normalizeUgPhone(m.phone_number)
-            }))
-            .filter(m => m.phone_number !== null)
+          batchId: batchIdRef.current,
+          recipients: finalMembers.map(m => ({ id: m.id, source: m.source }))
         })
       });
 
@@ -140,14 +136,14 @@ export default function BroadcastComposer({ members, churchId }: {
             setProgress(p => ({ ...p, sent: p.sent + 1 }));
           } else if (update.type === 'error') {
             setProgress(p => ({ ...p, failed: p.failed + 1 }));
-            console.error(`Broadcast error for ${update.recipient}:`, update.error);
+            
           } else if (update.type === 'halt') {
               setStatus({ type: 'error', message: `Halted: ${update.reason}` });
               stopReading = true;
               break;
             }
-          } catch (e) {
-            console.warn("Error parsing stream chunk", e);
+          } catch {
+            /* ignore a malformed stream line */
           }
         }
       }
@@ -155,10 +151,10 @@ export default function BroadcastComposer({ members, churchId }: {
       if (!stopReading) {
         setStatus({ type: 'success', message: 'Broadcast Complete! 🚀' });
         setMessage('');
+        batchIdRef.current = crypto.randomUUID();
         router.refresh();
       }
     } catch (err: any) {
-      console.error(err);
       setStatus({ type: 'error', message: err.message || "Failed to complete broadcast." });
     } finally {
       setIsSending(false);
@@ -250,7 +246,7 @@ export default function BroadcastComposer({ members, churchId }: {
                     <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[#C8B89A]" />
                     <input
                       type="text"
-                      placeholder="Search by name or phone..."
+                      placeholder="Search by name..."
                       value={searchQuery}
                       onChange={(e) => setSearchQuery(e.target.value)}
                       className="w-full pl-10 pr-4 py-2 bg-white border border-[rgba(181,98,42,0.1)] rounded-xl text-sm focus:border-[#B5622A] outline-none transition-all"

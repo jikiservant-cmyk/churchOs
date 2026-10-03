@@ -1,9 +1,19 @@
+-- ============================================================================
+-- churchOS baseline schema.
+--
+-- Apply order on a NEW project:
+--   1. supabase-schema.sql                                  (this file)
+--   2. supabase/migrations/20261001000000_security_hardening.sql
+--   3. (dev/demo only) supabase/seed.sql
+--
+-- THIS FILE ALONE IS NOT SAFE FOR PRODUCTION: privileges (REVOKE/GRANT) and the
+-- hashed-passkey / atomic-wallet functions are applied by the migration.
+-- ============================================================================
+
 -- 1. Create the church schema
 CREATE SCHEMA IF NOT EXISTS church;
 
--- 0. Enable Extensions
-CREATE EXTENSION IF NOT EXISTS "pgcrypto";
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+-- 0. Extensions: none required (gen_random_uuid() is built into PostgreSQL 13+).
 
 -- Enable Admin Role Enum if not exists
 DO $$
@@ -60,11 +70,19 @@ CREATE TABLE IF NOT EXISTS church.churches (
   id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
   name text NOT NULL,
   slug text NOT NULL UNIQUE,
-  passkey text DEFAULT '1234', -- 4-6 digit entrance code for ushers
   app_type text DEFAULT 'church', -- Added to match unified app structure
   theme_color text DEFAULT 'bg-blue-600',
   logo_url text,
   sender_id text,
+  created_at timestamptz DEFAULT now()
+);
+
+-- 5. Create Unified Tenant & Wallet Schema
+CREATE TABLE IF NOT EXISTS public.tenants (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  app_type text NOT NULL DEFAULT 'church', 
+  name text NOT NULL,
+  code text, -- Tenant code for Najiki integration
   created_at timestamptz DEFAULT now()
 );
 
@@ -93,15 +111,6 @@ CREATE TABLE IF NOT EXISTS church.sms_logs (
   error_message text,
   created_at timestamptz DEFAULT now(),
   updated_at timestamptz DEFAULT now()
-);
-
--- 5. Create Unified Tenant & Wallet Schema
-CREATE TABLE IF NOT EXISTS public.tenants (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  app_type text NOT NULL DEFAULT 'church', 
-  name text NOT NULL,
-  code text, -- Tenant code for Najiki integration
-  created_at timestamptz DEFAULT now()
 );
 
 -- Audit Logs (Removed as per user verification that it does not exist)
@@ -243,8 +252,8 @@ END;
 $$;
 
 -- Explicit Permission Grants
-GRANT EXECUTE ON FUNCTION public.provision_church_v2(uuid, text, text, text)
-TO anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION public.provision_church_v2(uuid, text, text, text) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.provision_church_v2(uuid, text, text, text) TO service_role;
 
 GRANT USAGE ON SCHEMA public TO authenticated, service_role;
 GRANT USAGE ON SCHEMA church TO authenticated, service_role;
@@ -255,9 +264,24 @@ GRANT SELECT ON auth.users TO postgres, service_role;
 -- 8. SECURITY: Row Level Security (RLS) Hardening
 -- This is the "Police Force" that prevents cross-tenant data leaks
 
+-- Create church.my_tenant_id() helper function FIRST (before policies use it)
+CREATE OR REPLACE FUNCTION church.my_tenant_id()
+RETURNS uuid AS $$
+BEGIN
+  RETURN (
+    SELECT tenant_id::uuid 
+    FROM public.admin_profiles 
+    WHERE id = auth.uid()
+    LIMIT 1
+  );
+END;
+$$ LANGUAGE plpgsql STABLE SECURITY DEFINER;
+
+
 -- Tenants Table RLS
 ALTER TABLE public.tenants ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Users can view tenants they are admins of" ON public.tenants;
 CREATE POLICY "Users can view tenants they are admins of" 
 ON public.tenants FOR SELECT 
 TO authenticated 
@@ -268,6 +292,7 @@ USING (
   )
 );
 
+DROP POLICY IF EXISTS "Service role full access on tenants" ON public.tenants;
 CREATE POLICY "Service role full access on tenants" 
 ON public.tenants FOR ALL 
 TO service_role 
@@ -276,11 +301,13 @@ USING (true);
 -- Admin Profiles RLS
 ALTER TABLE public.admin_profiles ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Users can view their own profile" ON public.admin_profiles;
 CREATE POLICY "Users can view their own profile" 
 ON public.admin_profiles FOR SELECT 
 TO authenticated 
 USING (id = auth.uid());
 
+DROP POLICY IF EXISTS "Service role full access on profiles" ON public.admin_profiles;
 CREATE POLICY "Service role full access on profiles" 
 ON public.admin_profiles FOR ALL 
 TO service_role 
@@ -290,12 +317,14 @@ USING (true);
 ALTER TABLE church.churches ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS "Admins can view their associated church" ON church.churches;
+DROP POLICY IF EXISTS "Admins can manage their associated church" ON church.churches;
 CREATE POLICY "Admins can manage their associated church" 
   ON church.churches FOR ALL 
   TO authenticated 
   USING (id = church.my_tenant_id())
   WITH CHECK (id = church.my_tenant_id());
 
+DROP POLICY IF EXISTS "Service role full access on churches" ON church.churches;
 CREATE POLICY "Service role full access on churches" 
 ON church.churches FOR ALL 
 TO service_role 
@@ -374,6 +403,126 @@ CREATE TABLE IF NOT EXISTS public.billing_events (
   created_at timestamptz DEFAULT now()
 );
 
+-- 9. Create missing tables for members and new converts
+CREATE TABLE IF NOT EXISTS church.members (
+  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  church_id uuid REFERENCES church.churches(id) NOT NULL,
+  full_name text NOT NULL,
+  phone_number text,
+  email text,
+  gender text,
+  birthday date,
+  is_youth boolean DEFAULT false,
+  status text DEFAULT 'active',
+  created_at timestamptz DEFAULT now(),
+  updated_at timestamptz DEFAULT now()
+);
+
+-- Optimization: Index for faster multi-tenant member lookups
+CREATE INDEX IF NOT EXISTS idx_members_church_id ON church.members(church_id);
+CREATE INDEX IF NOT EXISTS idx_members_phone_number ON church.members(phone_number);
+
+CREATE TABLE IF NOT EXISTS church.new_converts (
+  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  church_id uuid REFERENCES church.churches(id) NOT NULL,
+  name text NOT NULL,
+  contact text,
+  follow_up_status text DEFAULT 'pending',
+  notes text,
+  created_at timestamptz DEFAULT now()
+);
+
+-- Optimization: Index for faster multi-tenant convert lookups
+CREATE INDEX IF NOT EXISTS idx_new_converts_church_id ON church.new_converts(church_id);
+
+
+-- 11. Tables for Dashboard (Events, Attendance, Prayers, Groups, Donations)
+-- Events / Services
+CREATE TABLE IF NOT EXISTS church.events (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  church_id uuid NOT NULL REFERENCES church.churches(id) ON DELETE CASCADE,
+
+  name text NOT NULL,
+  service_type church.event_service_type NOT NULL,
+  event_date date NOT NULL DEFAULT CURRENT_DATE,
+  start_time time DEFAULT '09:00:00',
+  location text,
+  status church.event_status NOT NULL DEFAULT 'upcoming',
+  attending_count int DEFAULT 0,
+
+  created_by uuid REFERENCES auth.users(id) ON DELETE SET NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+
+  -- useful for filtering
+  UNIQUE (church_id, service_type, event_date, start_time)
+);
+
+-- Attendance Logs (bridge)
+CREATE TABLE IF NOT EXISTS church.attendance_logs (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  church_id uuid NOT NULL REFERENCES church.churches(id) ON DELETE CASCADE,
+
+  member_id uuid NOT NULL REFERENCES church.members(id) ON DELETE CASCADE,
+  event_id uuid NOT NULL REFERENCES church.events(id) ON DELETE CASCADE,
+
+  attendance_status church.attendance_status NOT NULL DEFAULT 'absent',
+  check_in_time timestamptz DEFAULT now(),
+  notes text,
+  recorded_by uuid REFERENCES auth.users(id) ON DELETE SET NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+
+  CONSTRAINT attendance_logs_member_event_unique
+    UNIQUE (member_id, event_id)
+);
+
+-- Optional: Attendance Flags
+CREATE TABLE IF NOT EXISTS church.attendance_flags (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  church_id uuid NOT NULL REFERENCES church.churches(id) ON DELETE CASCADE,
+
+  member_id uuid NOT NULL REFERENCES church.members(id) ON DELETE CASCADE,
+  flag_type church.attendance_flag_type NOT NULL,
+  status church.attendance_flag_status NOT NULL DEFAULT 'open',
+  notes text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+
+  -- One open flag of each type per member is typical for follow-up
+  UNIQUE (member_id, flag_type)
+);
+
+CREATE TABLE IF NOT EXISTS church.prayers (
+  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  church_id uuid REFERENCES church.churches(id) NOT NULL,
+  submitter_name text NOT NULL,
+  body text NOT NULL,
+  status text DEFAULT 'open', -- 'open', 'answered'
+  created_at timestamptz DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS church.small_groups (
+  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  church_id uuid REFERENCES church.churches(id) NOT NULL,
+  name text NOT NULL,
+  leader_name text NOT NULL,
+  meeting_day text NOT NULL,
+  member_count int DEFAULT 0,
+  created_at timestamptz DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS church.donations (
+  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  church_id uuid REFERENCES church.churches(id) NOT NULL,
+  category text NOT NULL, -- 'Tithes', 'Offerings', 'Missions'
+  amount_cents bigint NOT NULL,
+  created_at timestamptz DEFAULT now()
+);
+
+
+-- Optimization: Index for attendance logs
+CREATE INDEX IF NOT EXISTS idx_attendance_logs_event_member ON church.attendance_logs(event_id, member_id);
+CREATE INDEX IF NOT EXISTS idx_attendance_logs_church_id ON church.attendance_logs(church_id);
+
+
 -- 6. SMS Credit Deduction (Logic moved to Next.js routes in lib/sms-actions.ts)
 -- The application now handles wallet deduction and transaction logging explicitly
 -- to ensure consistent behavior across all environments.
@@ -398,19 +547,6 @@ BEGIN
   WHERE tenant_id = p_tenant_id;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
-
--- Create church.my_tenant_id() helper function FIRST (before policies use it)
-CREATE OR REPLACE FUNCTION church.my_tenant_id()
-RETURNS uuid AS $$
-BEGIN
-  RETURN (
-    SELECT tenant_id::uuid 
-    FROM public.admin_profiles 
-    WHERE id = auth.uid()
-    LIMIT 1
-  );
-END;
-$$ LANGUAGE plpgsql STABLE SECURITY DEFINER;
 
 -- 8. Consolidated RLS Policies for Other Tables
 ALTER TABLE church.sms_logs ENABLE ROW LEVEL SECURITY;
@@ -606,148 +742,67 @@ CREATE POLICY "donations_delete"
   TO authenticated
   USING (church_id = church.my_tenant_id());
 
--- Service Role Bypass for all
-CREATE POLICY "Service role bypass on sms_logs" ON church.sms_logs TO service_role USING (true);
-CREATE POLICY "Service role bypass on wallets" ON public.wallets TO service_role USING (true);
-CREATE POLICY "Service role bypass on wallet_transactions" ON public.wallet_transactions TO service_role USING (true);
-CREATE POLICY "Service role bypass on billing_events" ON public.billing_events TO service_role USING (true);
-CREATE POLICY "Service role bypass on members" ON church.members TO service_role USING (true);
-CREATE POLICY "Service role bypass on new_converts" ON church.new_converts TO service_role USING (true);
-CREATE POLICY "Service role bypass on events" ON church.events TO service_role USING (true);
-CREATE POLICY "Service role bypass on prayers" ON church.prayers TO service_role USING (true);
-CREATE POLICY "Service role bypass on small_groups" ON church.small_groups TO service_role USING (true);
-CREATE POLICY "Service role bypass on donations" ON church.donations TO service_role USING (true);
-
--- 9. Create missing tables for members and new converts
-CREATE TABLE IF NOT EXISTS church.members (
-  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
-  church_id uuid REFERENCES church.churches(id) NOT NULL,
+-- Visitors (the app reads/writes church.visitors, but the table was missing from this file).
+-- IF NOT EXISTS: a deployment that already has it keeps its definition; the policies below are what matter.
+CREATE TABLE IF NOT EXISTS church.visitors (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  church_id uuid NOT NULL REFERENCES church.churches(id) ON DELETE CASCADE,
   full_name text NOT NULL,
   phone_number text,
   email text,
   gender text,
   birthday date,
-  is_youth boolean DEFAULT false,
-  status text DEFAULT 'active',
+  visitor_type text DEFAULT 'first_time',
+  source text,
+  home_church_name text,
+  home_church_city text,
+  home_church_pastor text,
+  notes text,
   created_at timestamptz DEFAULT now(),
   updated_at timestamptz DEFAULT now()
 );
+CREATE INDEX IF NOT EXISTS idx_visitors_church_id ON church.visitors(church_id);
+ALTER TABLE church.visitors ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "visitors_rw_select" ON church.visitors;
+DROP POLICY IF EXISTS "visitors_rw_update" ON church.visitors;
+DROP POLICY IF EXISTS "visitors_insert" ON church.visitors;
+DROP POLICY IF EXISTS "visitors_delete" ON church.visitors;
+CREATE POLICY "visitors_rw_select" ON church.visitors FOR SELECT TO authenticated
+  USING (church_id = church.my_tenant_id());
+CREATE POLICY "visitors_rw_update" ON church.visitors FOR UPDATE TO authenticated
+  USING (church_id = church.my_tenant_id()) WITH CHECK (church_id = church.my_tenant_id());
+CREATE POLICY "visitors_insert" ON church.visitors FOR INSERT TO authenticated
+  WITH CHECK (church_id = church.my_tenant_id());
+CREATE POLICY "visitors_delete" ON church.visitors FOR DELETE TO authenticated
+  USING (church_id = church.my_tenant_id());
+DROP POLICY IF EXISTS "Service role bypass on visitors" ON church.visitors;
+CREATE POLICY "Service role bypass on visitors" ON church.visitors TO service_role USING (true);
 
--- Optimization: Index for faster multi-tenant member lookups
-CREATE INDEX IF NOT EXISTS idx_members_church_id ON church.members(church_id);
-CREATE INDEX IF NOT EXISTS idx_members_phone_number ON church.members(phone_number);
-
-CREATE TABLE IF NOT EXISTS church.new_converts (
-  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
-  church_id uuid REFERENCES church.churches(id) NOT NULL,
-  name text NOT NULL,
-  contact text,
-  follow_up_status text DEFAULT 'pending',
-  notes text,
-  created_at timestamptz DEFAULT now()
-);
-
--- Optimization: Index for faster multi-tenant convert lookups
-CREATE INDEX IF NOT EXISTS idx_new_converts_church_id ON church.new_converts(church_id);
-
--- Optimization: Index for attendance logs
-CREATE INDEX IF NOT EXISTS idx_attendance_logs_event_member ON church.attendance_logs(event_id, member_id);
-CREATE INDEX IF NOT EXISTS idx_attendance_logs_church_id ON church.attendance_logs(church_id);
+-- Service Role Bypass for all
+drop policy if exists "Service role bypass on sms_logs" on church.sms_logs;
+create policy "Service role bypass on sms_logs" on church.sms_logs TO service_role USING (true);
+DROP POLICY IF EXISTS "Service role bypass on wallets" ON public.wallets;
+CREATE POLICY "Service role bypass on wallets" ON public.wallets TO service_role USING (true);
+DROP POLICY IF EXISTS "Service role bypass on wallet_transactions" ON public.wallet_transactions;
+CREATE POLICY "Service role bypass on wallet_transactions" ON public.wallet_transactions TO service_role USING (true);
+DROP POLICY IF EXISTS "Service role bypass on billing_events" ON public.billing_events;
+CREATE POLICY "Service role bypass on billing_events" ON public.billing_events TO service_role USING (true);
+drop policy if exists "Service role bypass on members" on church.members;
+create policy "Service role bypass on members" on church.members TO service_role USING (true);
+drop policy if exists "Service role bypass on new_converts" on church.new_converts;
+create policy "Service role bypass on new_converts" on church.new_converts TO service_role USING (true);
+drop policy if exists "Service role bypass on events" on church.events;
+create policy "Service role bypass on events" on church.events TO service_role USING (true);
+drop policy if exists "Service role bypass on prayers" on church.prayers;
+create policy "Service role bypass on prayers" on church.prayers TO service_role USING (true);
+drop policy if exists "Service role bypass on small_groups" on church.small_groups;
+create policy "Service role bypass on small_groups" on church.small_groups TO service_role USING (true);
+drop policy if exists "Service role bypass on donations" on church.donations;
+create policy "Service role bypass on donations" on church.donations TO service_role USING (true);
 
 -- Enable RLS for new tables
 ALTER TABLE church.members ENABLE ROW LEVEL SECURITY;
 ALTER TABLE church.new_converts ENABLE ROW LEVEL SECURITY;
-
--- 10. Insert initial demo data for Grace Church
-INSERT INTO church.churches (id, name, slug, theme_color, logo_url)
-VALUES (
-  '11111111-1111-1111-1111-111111111111',
-  'Grace Church Kampala', 
-  'grace', 
-  'bg-green-600', 
-  'https://picsum.photos/seed/grace/200/200'
-) ON CONFLICT (id) DO UPDATE SET slug = EXCLUDED.slug;
-
--- 11. Tables for Dashboard (Events, Attendance, Prayers, Groups, Donations)
--- Events / Services
-CREATE TABLE IF NOT EXISTS church.events (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  church_id uuid NOT NULL REFERENCES church.churches(id) ON DELETE CASCADE,
-
-  name text NOT NULL,
-  service_type church.event_service_type NOT NULL,
-  event_date date NOT NULL DEFAULT CURRENT_DATE,
-  start_time time DEFAULT '09:00:00',
-  location text,
-  status church.event_status NOT NULL DEFAULT 'upcoming',
-  attending_count int DEFAULT 0,
-
-  created_by uuid REFERENCES auth.users(id) ON DELETE SET NULL,
-  created_at timestamptz NOT NULL DEFAULT now(),
-
-  -- useful for filtering
-  UNIQUE (church_id, service_type, event_date, start_time)
-);
-
--- Attendance Logs (bridge)
-CREATE TABLE IF NOT EXISTS church.attendance_logs (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  church_id uuid NOT NULL REFERENCES church.churches(id) ON DELETE CASCADE,
-
-  member_id uuid NOT NULL REFERENCES church.members(id) ON DELETE CASCADE,
-  event_id uuid NOT NULL REFERENCES church.events(id) ON DELETE CASCADE,
-
-  attendance_status church.attendance_status NOT NULL DEFAULT 'absent',
-  check_in_time timestamptz DEFAULT now(),
-  notes text,
-  recorded_by uuid REFERENCES auth.users(id) ON DELETE SET NULL,
-  created_at timestamptz NOT NULL DEFAULT now(),
-
-  CONSTRAINT attendance_logs_member_event_unique
-    UNIQUE (member_id, event_id)
-);
-
--- Optional: Attendance Flags
-CREATE TABLE IF NOT EXISTS church.attendance_flags (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  church_id uuid NOT NULL REFERENCES church.churches(id) ON DELETE CASCADE,
-
-  member_id uuid NOT NULL REFERENCES church.members(id) ON DELETE CASCADE,
-  flag_type church.attendance_flag_type NOT NULL,
-  status church.attendance_flag_status NOT NULL DEFAULT 'open',
-  notes text,
-  created_at timestamptz NOT NULL DEFAULT now(),
-
-  -- One open flag of each type per member is typical for follow-up
-  UNIQUE (member_id, flag_type)
-);
-
-CREATE TABLE IF NOT EXISTS church.prayers (
-  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
-  church_id uuid REFERENCES church.churches(id) NOT NULL,
-  submitter_name text NOT NULL,
-  body text NOT NULL,
-  status text DEFAULT 'open', -- 'open', 'answered'
-  created_at timestamptz DEFAULT now()
-);
-
-CREATE TABLE IF NOT EXISTS church.small_groups (
-  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
-  church_id uuid REFERENCES church.churches(id) NOT NULL,
-  name text NOT NULL,
-  leader_name text NOT NULL,
-  meeting_day text NOT NULL,
-  member_count int DEFAULT 0,
-  created_at timestamptz DEFAULT now()
-);
-
-CREATE TABLE IF NOT EXISTS church.donations (
-  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
-  church_id uuid REFERENCES church.churches(id) NOT NULL,
-  category text NOT NULL, -- 'Tithes', 'Offerings', 'Missions'
-  amount_cents bigint NOT NULL,
-  created_at timestamptz DEFAULT now()
-);
 
 ALTER TABLE church.events ENABLE ROW LEVEL SECURITY;
 ALTER TABLE church.attendance_logs ENABLE ROW LEVEL SECURITY;
@@ -755,12 +810,6 @@ ALTER TABLE church.attendance_flags ENABLE ROW LEVEL SECURITY;
 ALTER TABLE church.prayers ENABLE ROW LEVEL SECURITY;
 ALTER TABLE church.small_groups ENABLE ROW LEVEL SECURITY;
 ALTER TABLE church.donations ENABLE ROW LEVEL SECURITY;
-
--- Church Metadata Policy (Publicly viewable for landing pages/portals)
-CREATE POLICY "Churches are viewable by everyone" 
-  ON church.churches FOR SELECT 
-  TO public 
-  USING (true);
 
 -- Additional RLS Policies (using church.my_tenant_id())
 DROP POLICY IF EXISTS "Pastors can manage their attendance logs" ON church.attendance_logs;
@@ -809,8 +858,10 @@ CREATE POLICY "attendance_flags_delete"
   TO authenticated
   USING (church_id = church.my_tenant_id());
 
-CREATE POLICY "Service role bypass on attendance_logs" ON church.attendance_logs TO service_role USING (true);
-CREATE POLICY "Service role bypass on attendance_flags" ON church.attendance_flags TO service_role USING (true);
+drop policy if exists "Service role bypass on attendance_logs" on church.attendance_logs;
+create policy "Service role bypass on attendance_logs" on church.attendance_logs TO service_role USING (true);
+drop policy if exists "Service role bypass on attendance_flags" on church.attendance_flags;
+create policy "Service role bypass on attendance_flags" on church.attendance_flags TO service_role USING (true);
 
 -- RPC Functions for Attendance
 CREATE OR REPLACE FUNCTION church.get_or_create_event(
@@ -1145,52 +1196,8 @@ BEGIN
 END;
 $$;
 
-GRANT EXECUTE ON FUNCTION church.process_inactive_30_days(uuid) TO authenticated, service_role;
 GRANT EXECUTE ON FUNCTION church.refresh_inactive_30_days(uuid) TO authenticated, service_role;
 
--- Usher Passkey Validation
-CREATE OR REPLACE FUNCTION church.validate_usher_passkey(
-  p_church_slug text,
-  p_passkey text
-)
-RETURNS TABLE (
-  valid boolean,
-  church_id uuid,
-  church_name text
-) 
-LANGUAGE plpgsql
-SECURITY DEFINER
-AS $$
-BEGIN
-  RETURN QUERY
-  SELECT true AS valid, id AS church_id, name AS church_name
-  FROM church.churches
-  WHERE LOWER(slug) = LOWER(p_church_slug) 
-    AND passkey = p_passkey
-  LIMIT 1;
-END;
-$$;
-
--- Proxy to public schema to avoid routing issues
-CREATE OR REPLACE FUNCTION public.validate_usher_passkey(
-  p_church_slug text,
-  p_passkey text
-)
-RETURNS TABLE (
-  valid boolean,
-  church_id uuid,
-  church_name text
-) 
-LANGUAGE plpgsql
-SECURITY DEFINER
-AS $$
-BEGIN
-  RETURN QUERY SELECT * FROM church.validate_usher_passkey(p_church_slug, p_passkey);
-END;
-$$;
-
-GRANT EXECUTE ON FUNCTION church.validate_usher_passkey(text, text) TO authenticated, service_role;
-GRANT EXECUTE ON FUNCTION public.validate_usher_passkey(text, text) TO authenticated, service_role;
 GRANT EXECUTE ON FUNCTION church.get_or_create_event(uuid, church.event_service_type, date, time, text, text, uuid) TO authenticated, service_role;
 GRANT EXECUTE ON FUNCTION church.check_in_member_manual(uuid, uuid, church.attendance_status, timestamptz, text, uuid) TO authenticated, service_role;
 GRANT EXECUTE ON FUNCTION church.check_in_member_manual_by_date(uuid, church.event_service_type, date, uuid, church.attendance_status, timestamptz, text) TO authenticated, service_role;
@@ -1275,14 +1282,17 @@ $$;
 
 GRANT EXECUTE ON FUNCTION church.process_inactive_30_days_followups(uuid) TO authenticated, service_role;
 
--- Enable pg_cron
-CREATE EXTENSION IF NOT EXISTS pg_cron;
-
--- Schedule daily refresh (at 2 AM)
-SELECT cron.schedule('refresh-inactive-30-days-daily','0 2 * * *','SELECT church.refresh_inactive_30_days();');
-
--- Schedule daily follow-up processing (at 2:10 AM)
-SELECT cron.schedule('process-inactive-30-days-followups-daily','10 2 * * *','SELECT church.process_inactive_30_days_followups();');
+-- Nightly jobs (only when pg_cron is available; enable it in Dashboard → Database → Extensions)
+DO $cron$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron') THEN
+    PERFORM cron.schedule('refresh-inactive-30-days-daily', '0 2 * * *', 'SELECT church.refresh_inactive_30_days();');
+    PERFORM cron.schedule('process-inactive-30-days-followups-daily', '10 2 * * *', 'SELECT church.process_inactive_30_days_followups();');
+  ELSE
+    RAISE NOTICE 'pg_cron not installed: schedule church.refresh_inactive_30_days() and church.process_inactive_30_days_followups() externally.';
+  END IF;
+END
+$cron$;
 
 -- ============================================================
 -- Helper: ensure tenant consistency for FK-like relationships
@@ -1694,8 +1704,11 @@ to authenticated
 using (church_id = church.my_tenant_id());
 
 -- Service role policies for visitors tables
+drop policy if exists "Service role bypass on visitors" on church.visitors;
 create policy "Service role bypass on visitors" on church.visitors TO service_role USING (true);
+drop policy if exists "Service role bypass on visitor_visits" on church.visitor_visits;
 create policy "Service role bypass on visitor_visits" on church.visitor_visits TO service_role USING (true);
+drop policy if exists "Service role bypass on visitor_followups" on church.visitor_followups;
 create policy "Service role bypass on visitor_followups" on church.visitor_followups TO service_role USING (true);
+drop policy if exists "Service role bypass on visitor_conversions" on church.visitor_conversions;
 create policy "Service role bypass on visitor_conversions" on church.visitor_conversions TO service_role USING (true);
-create policy "Service role bypass on attendance_logs" on church.attendance_logs TO service_role USING (true);

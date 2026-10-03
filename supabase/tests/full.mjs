@@ -1,0 +1,11 @@
+import { newDb, runFile, as } from './lib.mjs';
+const R = new URL('../../', import.meta.url).pathname;
+const db = await newDb();
+const show = (label, errs) => { console.log(label, errs.length ? 'ERRORS' : 'clean'); for (const e of errs) console.log('  ERR:', e.err, '\n     ', e.stmt); };
+show('baseline#1', await runFile(db, R + 'supabase-schema.sql', { quiet: true }));
+show('migration#1', await runFile(db, R + 'supabase/migrations/20261001000000_security_hardening.sql', { quiet: true }));
+show('baseline#2 (idempotency)', await runFile(db, R + 'supabase-schema.sql', { quiet: true }));
+show('migration#2 (idempotency)', await runFile(db, R + 'supabase/migrations/20261001000000_security_hardening.sql', { quiet: true }));
+await runFile(db, R + 'supabase/seed.sql', { quiet: true });
+globalThis.db = db;
+export { db };

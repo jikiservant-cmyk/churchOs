@@ -59,7 +59,6 @@ export default function TopUpModal({ churchId, isOpen, onClose }: TopUpModalProp
       const formData = new FormData(e.currentTarget);
       formData.set('amount', finalAmount.toString());
       
-      console.log('Submitting top-up for amount:', finalAmount, 'phone:', phone);
 
       const result = await initiateNajikiPayment(formData);
       if (result?.success) {

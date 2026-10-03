@@ -1,10 +1,10 @@
 import { Metadata } from 'next';
 import { redirect } from 'next/navigation';
-import { getUsherSession } from '@/lib/attendance-actions';
+import { getUsherSession } from '@/lib/auth/usher';
+import { logoutUsher } from '@/lib/attendance-actions';
 import { createAdminClient } from '@/lib/supabase/server';
 import { UsherDashboardClient } from '@/components/attendance/UsherDashboardClient';
 import { LogOut, Activity } from 'lucide-react';
-import Link from 'next/link';
 
 export const metadata: Metadata = {
   title: 'Usher Dashboard | pastorOs',
@@ -26,7 +26,7 @@ export default async function UsherDashboard({ params }: { params: Promise<{ chu
   const { data: activeEvents } = await supabase
     .schema('church')
     .from('events')
-    .select('*')
+    .select('id, church_id, name, service_type, event_date, start_time, location, status, attending_count, created_at')
     .eq('church_id', session.church_id)
     .eq('status', 'active')
     .order('event_date', { ascending: false })
@@ -38,7 +38,7 @@ export default async function UsherDashboard({ params }: { params: Promise<{ chu
   const { data: members } = await supabase
     .schema('church')
     .from('members')
-    .select('*')
+    .select('id, full_name, phone_number, church_id')
     .eq('church_id', session.church_id)
     .order('full_name', { ascending: true });
 
@@ -69,12 +69,17 @@ export default async function UsherDashboard({ params }: { params: Promise<{ chu
             </div>
           </div>
           
-          <Link 
-            href={`/${church_slug}/usher`} 
-            className="p-2 text-[#9A7E65] hover:text-red-500 transition-colors"
+          <form
+            action={async () => {
+              'use server';
+              await logoutUsher(church_slug);
+              redirect(`/${church_slug}/usher`);
+            }}
           >
-            <LogOut className="w-5 h-5" />
-          </Link>
+            <button type="submit" aria-label="Sign out" className="p-2 text-[#9A7E65] hover:text-red-500 transition-colors">
+              <LogOut className="w-5 h-5" />
+            </button>
+          </form>
         </div>
       </header>
 

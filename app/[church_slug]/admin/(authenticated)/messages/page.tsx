@@ -1,153 +1,56 @@
-import { createClient } from '@/lib/supabase/server';
+import { requireTenantAdmin } from '@/lib/auth/tenant';
+import { maskPhone } from '@/lib/security';
+import { normalizeUgPhone } from '@/lib/utils';
 import {
   History,
-  AlertCircle,
 } from 'lucide-react';
 import BroadcastComposer from '@/components/BroadcastComposer';
-import { getChurchBySlug } from '@/lib/db';
 import BroadcastHistory from '@/components/BroadcastHistory';
 import SMSWalletWidget from '@/components/SMSWalletWidget';
 
 export default async function MessagesPage(props: {
   params: Promise<{ church_slug: string }>;
 }) {
-  const resolvedParams = await props.params;
-  const supabase = await createClient();
+  const { church_slug } = await props.params;
+  const { church, supabase } = await requireTenantAdmin(church_slug);
 
-  let churchObj = await getChurchBySlug(resolvedParams.church_slug);
+  const [{ data: balanceData }, memberRes, convertRes] = await Promise.all([
+    supabase.schema('public').from('wallets').select('balance, sms_rate').eq('tenant_id', church.id).maybeSingle(),
+    supabase.schema('church').from('members').select('id, full_name, phone_number, gender, is_youth').eq('church_id', church.id).not('phone_number', 'is', null).limit(5000),
+    supabase.schema('church').from('new_converts').select('id, name, contact').eq('church_id', church.id).not('contact', 'is', null).limit(5000),
+  ]);
+  if (memberRes.error) console.error('[messages page] members query failed:', memberRes.error.code);
+  if (convertRes.error) console.error('[messages page] converts query failed:', convertRes.error.code);
 
-  // If slug lookup failed, try to resolve by the logged-in user's profile
-  if (!churchObj) {
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-    if (user) {
-      const { data: profile } = await supabase
-        .from("admin_profiles")
-        .select("tenant_id")
-        .eq("id", user.id)
-        .maybeSingle();
+  // The browser only ever receives a MASKED number for display. The send
+  // endpoints look real numbers up server-side by id, so the full contact
+  // list is no longer shipped to the client (or into the RSC payload).
+  const display = (raw: string | null) => (raw && normalizeUgPhone(raw) ? maskPhone(normalizeUgPhone(raw)) : null);
 
-      if (profile?.tenant_id) {
-        const { data: profileChurch } = await supabase
-          .schema("church")
-          .from("churches")
-          .select("*")
-          .eq("id", profile.tenant_id)
-          .maybeSingle();
+  const realMembers = (memberRes.data || []).flatMap((m) => {
+    const phone = display(m.phone_number);
+    return phone ? [{ id: m.id, full_name: m.full_name, phone_number: phone, source: 'member' as const, gender: m.gender, is_youth: m.is_youth }] : [];
+  });
+  const newConverts = (convertRes.data || []).flatMap((nc) => {
+    const phone = display(nc.contact);
+    return phone ? [{ id: nc.id, full_name: nc.name, phone_number: phone, source: 'new_convert' as const }] : [];
+  });
+  const members = [...realMembers, ...newConverts];
 
-        if (profileChurch) {
-          churchObj = {
-            id: profileChurch.id,
-            name: profileChurch.name,
-            slug: profileChurch.slug,
-            themeColor: profileChurch.theme_color || "bg-blue-600",
-            logoUrl:
-              profileChurch.logo_url ||
-              `https://picsum.photos/seed/${profileChurch.slug}/200/200`,
-          };
-        }
-      }
-    }
-  }
-
-  const church = churchObj || {
-    id: "placeholder",
-    name: resolvedParams.church_slug,
-    slug: resolvedParams.church_slug,
-    themeColor: "bg-slate-900",
-    logoUrl: `https://picsum.photos/seed/${resolvedParams.church_slug}/200/200`,
-  };
-
-  let members: any = [];
-  let balanceData: any = null;
-
-  const isPlaceholder =
-    !churchObj || church.id === "placeholder" || church.id === "unknown";
-
-  if (church && !isPlaceholder) {
-    // 1. Fetch balance from the unified wallet
-    const { data: balance } = await supabase
-      .schema("public")
-      .from("wallets")
-      .select("*")
-      .eq("tenant_id", church.id)
-      .maybeSingle();
-
-    balanceData = balance;
-
-    // 2. Fetch members
-    let { data: memberData, error: memberError } = await supabase
-      .schema("church")
-      .from("members")
-      .select("*")
-      .eq("church_id", church.id)
-      .not("phone_number", "is", null);
-
-    if (memberError) {
-      console.error(
-        "[MessagesPage] Member fetch error details:",
-        memberError.message,
-        memberError.details,
-        memberError.hint,
-      );
-    }
-
-    // 3. Fetch new converts
-    let { data: newConvertsData, error: convertsError } = await supabase
-      .schema("church")
-      .from("new_converts")
-      .select("*")
-      .eq("church_id", church.id)
-      .not("contact", "is", null);
-
-    if (convertsError) {
-      console.error(
-        "[MessagesPage] New converts fetch error details:",
-        convertsError.message,
-        convertsError.details,
-        convertsError.hint,
-      );
-    }
-
-    // Unify them into a generic Recipient array
-    const realMembers = (memberData || []).map((m) => ({
-      id: m.id,
-      full_name: m.full_name,
-      phone_number: m.phone_number,
-      source: "member" as const,
-      gender: m.gender,
-      is_youth: m.is_youth,
-    }));
-
-    const newConverts = (newConvertsData || []).map((nc) => ({
-      id: nc.id,
-      full_name: nc.name,
-      phone_number: nc.contact, // map contact to phone_number
-      source: "new_convert" as const,
-    }));
-
-    members = [...realMembers, ...newConverts];
-  }
-
-  const validMembersCount = members?.length || 0;
   const balanceUgx = balanceData?.balance || 0;
   const smsRate = balanceData?.sms_rate || 70;
   const remainingSMS = Math.floor(balanceUgx / smsRate);
   const leftoverUGX = balanceUgx % smsRate;
 
-  // Fetch recent SMS logs for broadcast history
-  let smsLogs: any = [];
-  if (church && !isPlaceholder) {
-    const { data } = await supabase
-      .schema("church")
-      .from("sms_logs")
-      .select("id, created_at, body, status")
-      .eq("tenant_id", church.id)
-      .order("created_at", { ascending: false })
-      .limit(200);
-    smsLogs = data || [];
-  }
+  // Recent SMS logs for broadcast history
+  const { data: smsLogsData } = await supabase
+    .schema('church')
+    .from('sms_logs')
+    .select('id, created_at, body, status')
+    .eq('tenant_id', church.id)
+    .order('created_at', { ascending: false })
+    .limit(200);
+  const smsLogs: any[] = smsLogsData || [];
 
   // Group by date, then by message to represent a "broadcast" per day
   const groupedByDateAndMsg = (smsLogs || []).reduce((acc: any, log: any) => {
@@ -227,32 +130,7 @@ export default async function MessagesPage(props: {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Composer (Left Column) */}
         <div className="lg:col-span-2 space-y-6">
-          {church && !isPlaceholder ? (
-            <BroadcastComposer members={members || []} churchId={church.id} />
-          ) : (
-            <div className="bg-[#F0E6D3] rounded-2xl border border-dashed border-[#B5622A]/30 p-12 text-center">
-              <div className="w-16 h-16 bg-[#B5622A]/10 rounded-full flex items-center justify-center mx-auto mb-4">
-                <AlertCircle className="w-8 h-8 text-[#B5622A]" />
-              </div>
-              <h3
-                style={{ fontFamily: "'Playfair Display', serif" }}
-                className="text-xl font-bold text-[#1E1208] mb-2"
-              >
-                Church Connection Required
-              </h3>
-              <p className="text-[#9A7E65] text-sm max-w-sm mx-auto mb-6">
-                We couldn&apos;t securely verify which church you are sending
-                for. Please try refreshing or visiting your church&apos;s direct
-                admin portal.
-              </p>
-              <a
-                href="."
-                className="inline-block px-6 py-2 bg-[#2B1A0E] text-[#F5E6CE] text-xs font-bold rounded-lg uppercase tracking-widest hover:bg-[#3D2614] transition-all"
-              >
-                Refresh Dashboard
-              </a>
-            </div>
-          )}
+          <BroadcastComposer members={members} churchId={church.id} />
         </div>
 
         {/* History (Right Column) */}

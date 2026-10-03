@@ -1,4 +1,5 @@
-import { createClient } from '@/lib/supabase/server';
+import { requireTenantAdmin } from '@/lib/auth/tenant';
+import { isUuid } from '@/lib/security';
 import { notFound } from 'next/navigation';
 import { editNewConvert } from '../../actions';
 import SubmitButton from '@/components/SubmitButton';
@@ -7,7 +8,8 @@ export default async function EditNewConvertPage(props: {
   params: Promise<{ church_slug: string; id: string }>;
 }) {
   const resolvedParams = await props.params;
-  const supabase = await createClient();
+  if (!isUuid(resolvedParams.id)) notFound();
+  const { church, supabase } = await requireTenantAdmin(resolvedParams.church_slug);
 
   // Fetch the specific convert
   const { data: convert, error } = await supabase
@@ -15,6 +17,7 @@ export default async function EditNewConvertPage(props: {
     .from('new_converts')
     .select('*')
     .eq('id', resolvedParams.id)
+    .eq('church_id', church.id)
     .maybeSingle();
 
   if (!convert || error) {
