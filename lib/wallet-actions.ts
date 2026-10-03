@@ -6,6 +6,7 @@ import { getCurrentTenantAdmin } from '@/lib/auth/tenant';
 import { rateLimit } from '@/lib/security';
 import { audit } from '@/lib/audit';
 import { normalizeUgPhone } from './utils';
+import { najikiAuthHeaders, najikiBaseUrl, buildTopupBody, parseCreatePaymentResponse } from './najiki';
 
 const MIN_TOPUP_UGX = 2_000;
 const MAX_TOPUP_UGX = 5_000_000;
@@ -45,20 +46,17 @@ export async function initiateNajikiPayment(formData: FormData) {
 
     const apiKey = process.env.NAJIKI_API_KEY;
     const applicationCode = process.env.NAJIKI_APPLICATION_CODE;
-    if (!apiKey) {
-      console.error('[najiki] NAJIKI_API_KEY is not configured');
+    if (!apiKey || !applicationCode) {
+      console.error('[najiki] NAJIKI_API_KEY / NAJIKI_APPLICATION_CODE is not configured');
       return { error: 'Payment service not configured.' };
     }
-    const baseUrl = (process.env.NAJIKI_API_URL || 'https://najiki.netlify.app').replace(/\/$/, '');
+    const baseUrl = najikiBaseUrl(process.env.NAJIKI_API_URL);
 
     const db = await createAdminClient();
-    const { data: tenant, error: tenantError } = await db.from('tenants').select('code').eq('id', tenantId).maybeSingle();
-    if (tenantError) {
-      console.error('[najiki] tenant lookup failed:', tenantError.code);
-      return { error: 'Failed to load church data.' };
-    }
-    const tenantCode = tenant?.code || process.env.NAJIKI_TENANT_CODE;
-    if (!tenantCode) return { error: 'Payment account is not configured for this church.' };
+
+    // SMS top-ups are platform money (payment type SMS_TOPUP), so no Najiki tenant is
+    // needed: the church is identified by externalEntityId / metadata, which Najiki
+    // echoes back in the notification.
 
     // Pending transaction first; the webhook credits THIS recorded amount.
     const reference = `CHURCH-${randomUUID()}`;
@@ -86,43 +84,38 @@ export async function initiateNajikiPayment(formData: FormData) {
     try {
       response = await fetch(`${baseUrl}/api/payments`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
-        body: JSON.stringify({
-          amount,
-          phoneNumber: toLocalFormat(phone),
-          reference,
-          currency: 'UGX',
-          description: 'ChurchOS SMS Wallet Top-up',
-          externalEntityId: tenantId,
-          metadata: { churchId: tenantId, source: 'admin-dashboard' },
-          ...(applicationCode ? { applicationCode } : {}),
-          tenantCode,
-        }),
+        headers: najikiAuthHeaders(apiKey),
+        body: JSON.stringify(buildTopupBody({ applicationCode, reference, tenantId, amount, phoneNumber: toLocalFormat(phone) })),
         signal: AbortSignal.timeout(20_000),
       });
       const text = await response.text();
       try { result = JSON.parse(text); } catch { result = { message: 'Invalid response from payment provider' }; }
     } catch (err) {
+      // Ambiguous: Najiki may have created the payment before the connection dropped.
+      // Leave the row PENDING so a late success notification can still credit it
+      // (apply_topup refuses rows already marked failed).
       console.error('[najiki] request failed:', (err as Error).message);
-      await markFailed({ error: 'request_failed' });
-      return { error: 'Payment provider unreachable. Please try again.' };
+      return { error: 'Payment provider did not respond. If you receive a prompt on your phone, approve it and your balance will update shortly.' };
     }
 
     if (!response.ok) {
       console.error('[najiki] provider returned', response.status);
+      // 5xx is ambiguous (payment may exist): leave pending. 4xx means Najiki rejected it.
+      if (response.status >= 500) return { error: 'Payment service is busy. Please try again in a minute.' };
       await markFailed({ status: response.status, message: String(result.error || result.message || '').slice(0, 200) });
       return { error: 'Payment request failed. Please try again.' };
     }
 
-    if (typeof result.paymentIntentId === 'string') {
+    const { paymentId, najikiReference, status: najikiStatus } = parseCreatePaymentResponse(result);
+    if (paymentId) {
       await db
         .from('wallet_transactions')
-        .update({ idempotency_key: result.paymentIntentId, provider_payload: { paymentIntentId: result.paymentIntentId, status: result.status ?? null } })
+        .update({ idempotency_key: paymentId, provider_payload: { paymentId, najikiReference, status: najikiStatus } })
         .eq('reference_code', reference);
     }
 
     await audit('wallet.topup_initiated', { tenantId, actor: admin.user.id, meta: { amount, reference } });
-    return { success: true, message: 'Payment prompt sent to your phone!', paymentIntentId: result.paymentIntentId, reference };
+    return { success: true, message: 'Payment prompt sent to your phone!', paymentIntentId: paymentId, reference };
   } catch (err) {
     console.error('[najiki] unexpected error:', (err as Error).message);
     return { error: 'An unexpected error occurred. Please try again.' };

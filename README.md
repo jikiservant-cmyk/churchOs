@@ -66,3 +66,10 @@ Not in this repo: the `sync_missed_3_sundays_flags` Edge Function that
 - `npm audit` still reports a PostCSS advisory bundled inside `next` 15.x; fixing it needs Next 16.
 - Rate limits are fixed-window counters in Postgres; behind a proxy that doesn't set
   `x-vercel-forwarded-for` / `x-real-ip` the client IP may be `unknown`.
+
+## Najiki integration checklist
+
+In Najiki (Setup): Application `code` == `NAJIKI_APPLICATION_CODE` (case-sensitive), `baseUrl` = this app's
+public URL, `webhookPath` = `/api/najiki/webhook`, a payment type `SMS_TOPUP` for the application (platform
+money), and the webhook secret copied into `NAJIKI_WEBHOOK_SECRET`. Contract tests: `tests/najiki.test.mjs`.
+Najiki rate limits are per API key (60 SMS/min, 20 payments/min); SMS beyond that falls back to Africa's Talking.

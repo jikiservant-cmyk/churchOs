@@ -32,7 +32,7 @@ export interface SendSMSResult {
 }
 
 const PROVIDER_TIMEOUT_MS = 15_000;
-const SUCCESS_STATUSES = new Set(['success', 'sent', 'queued', 'buffered']);
+const SUCCESS_STATUSES = new Set(['success', 'sent', 'queued', 'buffered', 'delivered']);
 export const MAX_SMS_LENGTH = 480;
 
 export class InsufficientBalanceError extends Error {
@@ -42,20 +42,36 @@ export class InsufficientBalanceError extends Error {
   }
 }
 
-async function sendNajikiSMS(to: string, message: string) {
+/** Najiki got the request (or may have) but we cannot tell: never fall back to a second provider. */
+class AmbiguousProviderError extends Error {}
+
+/**
+ * Najiki answers 202 "queued": delivery happens later and its outcome arrives on
+ * /api/najiki/webhook (SMS_DELIVERY_UPDATE), which refunds on failure.
+ * `Idempotency-Key` makes a retry of the same request return the original job
+ * instead of sending a second SMS.
+ */
+async function sendNajikiSMS(to: string, message: string, opts: { senderId?: string; idempotencyKey: string }) {
   const url = process.env.NAJIKI_API_URL;
   const key = process.env.NAJIKI_API_KEY;
   const app = process.env.NAJIKI_APPLICATION_CODE;
   if (!url || !key || !app) throw new Error('Najiki is not configured');
 
-  const res = await fetch(`${url.replace(/\/$/, '')}/api/messaging/send`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ to, message, applicationCode: app }),
-    signal: AbortSignal.timeout(PROVIDER_TIMEOUT_MS),
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${url.replace(/\/$/, '')}/api/messaging/send`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', 'Idempotency-Key': opts.idempotencyKey },
+      body: JSON.stringify({ to, message, applicationCode: app, ...(opts.senderId ? { from: opts.senderId } : {}) }),
+      signal: AbortSignal.timeout(PROVIDER_TIMEOUT_MS),
+    });
+  } catch (err) {
+    throw new AmbiguousProviderError(`Najiki unreachable: ${(err as Error).message}`);
+  }
+  // 4xx/5xx are definite answers (including 429 from its rate limiter, which runs
+  // before a job is created), so falling back to Africa's Talking cannot duplicate.
   if (!res.ok) throw new Error(`Najiki API error: ${res.status}`);
-  const json = (await res.json()) as { smsId?: string; status?: string };
+  const json = (await res.json().catch(() => ({}))) as { smsId?: string; status?: string };
   return { messageId: json.smsId ?? null, status: json.status ?? 'queued' };
 }
 
@@ -110,6 +126,9 @@ export async function sendSingleSMS(params: SendSMSParams): Promise<SendSMSResul
 
   // ── 1. Log row (idempotent; reuse FAILED rows so retries work) ────────────
   let logId: string;
+  // Stable per log row so a retry after a timeout dedupes at Najiki; fresh only when
+  // Najiki itself reported the previous job as permanently failed.
+  let najikiKeySuffix = '';
   const { data: inserted, error: insertErr } = await logs()
     .insert({ tenant_id: churchId, recipient_phone: phone, body: message, status: 'PENDING', idempotency_key: idemKey, sender_id: senderId || null })
     .select('id')
@@ -127,6 +146,7 @@ export async function sendSingleSMS(params: SendSMSParams): Promise<SendSMSResul
     // FAILED → retry on the same row. Compare-and-set so only one retry wins.
     const { data: claimed } = await logs().update({ status: 'PENDING', error_message: null, updated_at: new Date().toISOString() }).eq('id', existing.id).eq('status', existing.status).select('id');
     if (!claimed?.length) throw new Error('SMS is already being processed');
+    if (String(existing.message_provider_status).toLowerCase() === 'failed') najikiKeySuffix = `-${randomUUID().slice(0, 8)}`;
     logId = existing.id;
   } else {
     console.error('[sms] log insert failed:', insertErr?.code, insertErr?.message);
@@ -165,11 +185,15 @@ export async function sendSingleSMS(params: SendSMSParams): Promise<SendSMSResul
   let outcome: { messageId: string | null; status: string; ok: boolean } | null = null;
   let providerError = 'Provider unavailable';
   try {
-    const r = await sendNajikiSMS(phone, message);
+    const r = await sendNajikiSMS(phone, message, { senderId, idempotencyKey: `sms-${logId}${najikiKeySuffix}` });
     outcome = { ...r, ok: true };
   } catch (najikiErr) {
     providerError = (najikiErr as Error).message;
-    try {
+    if (najikiErr instanceof AmbiguousProviderError) {
+      // Do not also send via Africa's Talking: Najiki may already have queued it.
+      // Refund; a retry reuses the same Idempotency-Key, so it cannot double-send.
+      outcome = null;
+    } else try {
       outcome = await sendAfricasTalkingSMS(phone, message, senderId);
       if (!outcome.ok) providerError = `Provider status: ${outcome.status}`;
     } catch (atErr) {
