@@ -1,211 +1,132 @@
 'use server';
 
-import { createClient, createAdminClient } from '@/lib/supabase/server';
 import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
+import { assertTenantAdmin, AuthError } from '@/lib/auth/tenant';
 import { normalizeUgPhone } from '@/lib/utils';
+import {
+  field, slugField, uuidField, cleanDate, cleanEmail, cleanGender, text, checkBulk,
+  isRedirectError, GENERIC_SAVE_ERROR,
+} from '@/lib/form-utils';
 
-async function checkChurchAdminAuth(churchSlug: string) {
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) throw new Error('Unauthenticated');
+function back(slug: string | null, path: string, error: string): never {
+  const q = new URLSearchParams({ error }).toString();
+  redirect(slug ? `/${slug}/admin/${path}?${q}` : `/?${q}`);
+}
 
-  const adminSupabase = await createAdminClient();
-  const { data: church } = await adminSupabase.schema('church').from('churches').select('id').eq('slug', churchSlug).single();
-  if (!church) throw new Error('Church not found');
+const describe = (err: unknown, fallback: string) => (err instanceof AuthError ? err.message : fallback);
 
-  const { data: profile } = await adminSupabase.from('admin_profiles').select('tenant_id').eq('id', user.id).eq('tenant_id', church.id).single();
-  if (!profile) throw new Error('Unauthorized to perform this action for this church');
+function phoneOrRaw(raw: string | null): string | null {
+  if (!raw) return null;
+  return normalizeUgPhone(raw) ?? raw;
+}
 
-  return { supabase, user, churchId: church.id };
+function fromForm(fd: FormData) {
+  const type = field(fd, 'visitorType', 40);
+  return {
+    full_name: field(fd, 'fullName', 120),
+    phone_number: phoneOrRaw(field(fd, 'phoneNumber', 32) || null),
+    email: cleanEmail(fd.get('email')),
+    gender: cleanGender(fd.get('gender')),
+    birthday: cleanDate(fd.get('birthday')),
+    visitor_type: type || 'first_time',
+    source: field(fd, 'source', 100) || null,
+    home_church_name: field(fd, 'homeChurchName', 120) || null,
+    home_church_city: field(fd, 'homeChurchCity', 120) || null,
+    home_church_pastor: field(fd, 'homeChurchPastor', 120) || null,
+    notes: field(fd, 'notes', 1000) || null,
+  };
 }
 
 export async function addVisitor(formData: FormData) {
-  let churchSlug = formData.get('churchSlug') as string;
-  let searchParams = '';
+  const slug = slugField(formData);
+  let error = '';
 
   try {
-    const { supabase, churchId: finalChurchId } = await checkChurchAdminAuth(churchSlug);
+    const { supabase, church } = await assertTenantAdmin(slug ?? '');
+    const payload = fromForm(formData);
+    if (!payload.full_name) back(church.slug, 'visitors', 'Name is required.');
 
-    const fullName = formData.get('fullName') as string;
-    const phoneNumber = formData.get('phoneNumber') as string;
-    const email = formData.get('email') as string;
-    const gender = formData.get('gender') as string;
-    const birthday = formData.get('birthday') as string;
-    const visitorType = formData.get('visitorType') as string;
-    const source = formData.get('source') as string;
-    const homeChurchName = formData.get('homeChurchName') as string;
-    const homeChurchCity = formData.get('homeChurchCity') as string;
-    const homeChurchPastor = formData.get('homeChurchPastor') as string;
-    const notes = formData.get('notes') as string;
-
-    let formattedPhone = phoneNumber.trim() || null;
-    if (phoneNumber) {
-      const normalized = normalizeUgPhone(phoneNumber);
-      if (normalized) {
-        formattedPhone = normalized;
-      }
+    const { error: dbErr } = await supabase.schema('church').from('visitors').insert({ church_id: church.id, ...payload });
+    if (dbErr) {
+      console.error('[visitors] insert failed:', dbErr.code);
+      error = GENERIC_SAVE_ERROR;
+    } else {
+      revalidatePath(`/${church.slug}/admin/visitors`);
     }
-
-    const payload = {
-      church_id: finalChurchId,
-      full_name: fullName,
-      phone_number: formattedPhone,
-      email: email || null,
-      gender: gender ? gender.toLowerCase() : null,
-      birthday: birthday || null,
-      visitor_type: visitorType || 'first_time',
-      source: source || null,
-      home_church_name: homeChurchName || null,
-      home_church_city: homeChurchCity || null,
-      home_church_pastor: homeChurchPastor || null,
-      notes: notes || null
-    };
-
-    const { error } = await supabase
-      .schema('church')
-      .from('visitors')
-      .insert(payload);
-
-    if (error) {
-      console.error('Error adding visitor:', error);
-      searchParams = new URLSearchParams({
-        error: `DB Insert Error: ${error.message}${error.details ? ` (${error.details})` : ''}`,
-      }).toString();
-    }
-  } catch (err: any) {
-    console.error('Unhandled exception in addVisitor:', err);
-    if (err.message === 'NEXT_REDIRECT') {
-      throw err;
-    }
-    searchParams = new URLSearchParams({ error: 'Failed to add visitor due to application error.' }).toString();
+  } catch (err) {
+    if (isRedirectError(err)) throw err;
+    console.error('[visitors] add failed:', (err as Error).message);
+    error = describe(err, 'Failed to add visitor.');
   }
 
-  if (searchParams) {
-    redirect(`/${churchSlug}/admin/visitors?${searchParams}`);
-  }
-
-  revalidatePath(`/${churchSlug}/admin/visitors`);
+  if (error) back(slug, 'visitors', error);
 }
 
 export async function editVisitor(formData: FormData) {
-  let churchSlug = formData.get('churchSlug') as string;
-  let visitorId = formData.get('visitorId') as string;
-  let searchParams = '';
+  const slug = slugField(formData);
+  const visitorId = uuidField(formData, 'visitorId');
+  let error = '';
 
   try {
-    const { supabase, churchId: finalChurchId } = await checkChurchAdminAuth(churchSlug);
+    const { supabase, church } = await assertTenantAdmin(slug ?? '');
+    if (!visitorId) back(church.slug, 'visitors', 'Invalid visitor.');
+    const payload = fromForm(formData);
+    if (!payload.full_name) back(church.slug, `visitors/edit/${visitorId}`, 'Name is required.');
 
-    const fullName = formData.get('fullName') as string;
-    const phoneNumber = formData.get('phoneNumber') as string;
-    const email = formData.get('email') as string;
-    const gender = formData.get('gender') as string;
-    const birthday = formData.get('birthday') as string;
-    const visitorType = formData.get('visitorType') as string;
-    const source = formData.get('source') as string;
-    const homeChurchName = formData.get('homeChurchName') as string;
-    const homeChurchCity = formData.get('homeChurchCity') as string;
-    const homeChurchPastor = formData.get('homeChurchPastor') as string;
-    const notes = formData.get('notes') as string;
-
-    let formattedPhone = phoneNumber.trim() || null;
-    if (phoneNumber) {
-      const normalized = normalizeUgPhone(phoneNumber);
-      if (normalized) {
-        formattedPhone = normalized;
-      }
-    }
-
-    const payload = {
-      full_name: fullName,
-      phone_number: formattedPhone,
-      email: email || null,
-      gender: gender ? gender.toLowerCase() : null,
-      birthday: birthday || null,
-      visitor_type: visitorType || 'first_time',
-      source: source || null,
-      home_church_name: homeChurchName || null,
-      home_church_city: homeChurchCity || null,
-      home_church_pastor: homeChurchPastor || null,
-      notes: notes || null
-    };
-
-    const { error } = await supabase
+    const { error: dbErr } = await supabase
       .schema('church')
       .from('visitors')
       .update(payload)
-      .eq('id', visitorId);
+      .eq('id', visitorId)
+      .eq('church_id', church.id);
 
-    if (error) {
-      console.error('Error updating visitor:', error);
-      searchParams = new URLSearchParams({
-        error: `DB Update Error: ${error.message}`,
-      }).toString();
+    if (dbErr) {
+      console.error('[visitors] update failed:', dbErr.code);
+      error = GENERIC_SAVE_ERROR;
+    } else {
+      revalidatePath(`/${church.slug}/admin/visitors`);
+      redirect(`/${church.slug}/admin/visitors`);
     }
-  } catch (err: any) {
-    console.error('Unhandled exception in editVisitor:', err);
-    if (err.message === 'NEXT_REDIRECT') {
-      throw err;
-    }
-    searchParams = new URLSearchParams({ error: 'Failed to update visitor.' }).toString();
+  } catch (err) {
+    if (isRedirectError(err)) throw err;
+    console.error('[visitors] edit failed:', (err as Error).message);
+    error = describe(err, 'Failed to update visitor.');
   }
 
-  if (searchParams) {
-    redirect(`/${churchSlug}/admin/visitors/edit/${visitorId}?${searchParams}`);
-  }
-
-  revalidatePath(`/${churchSlug}/admin/visitors`);
-  redirect(`/${churchSlug}/admin/visitors`);
+  if (error) back(slug, visitorId ? `visitors/edit/${visitorId}` : 'visitors', error);
 }
 
-export async function bulkAddVisitors(churchSlug: string, visitorsData: any[]) {
+export async function bulkAddVisitors(churchSlug: string, visitorsData: unknown[]) {
   try {
-    const { supabase, churchId: finalChurchId } = await checkChurchAdminAuth(churchSlug);
+    const bad = checkBulk(visitorsData);
+    if (bad) return { error: bad };
+    const { supabase, church } = await assertTenantAdmin(churchSlug);
 
-    const payload = visitorsData.map((visitor) => {
-      let rawPhone = visitor.phoneNumber || visitor.phone_number || '';
-      let formattedPhone = rawPhone.trim() || null;
-      
-      if (rawPhone) {
-        const normalized = normalizeUgPhone(String(rawPhone));
-        if (normalized) {
-          formattedPhone = normalized;
-        }
-      }
+    const payload = (visitorsData as Record<string, unknown>[]).map((v) => ({
+      church_id: church.id,
+      full_name: text(v.fullName ?? v.full_name ?? v.name, 120) ?? 'Unknown',
+      phone_number: phoneOrRaw(text(v.phoneNumber ?? v.phone_number, 32)),
+      email: cleanEmail(v.email),
+      gender: cleanGender(v.gender),
+      birthday: cleanDate(v.birthday),
+      visitor_type: text(v.visitorType ?? v.visitor_type, 40) ?? 'first_time',
+      source: text(v.source, 100),
+      home_church_name: text(v.homeChurchName ?? v.home_church_name, 120),
+      home_church_city: text(v.homeChurchCity ?? v.home_church_city, 120),
+      home_church_pastor: text(v.homeChurchPastor ?? v.home_church_pastor, 120),
+      notes: text(v.notes, 1000),
+    }));
 
-      let gender = visitor.gender ? String(visitor.gender).toLowerCase() : null;
-      if (gender !== 'male' && gender !== 'female') gender = null;
-
-      return {
-        church_id: finalChurchId,
-        full_name: visitor.fullName || visitor.full_name || visitor.name || 'Unknown',
-        phone_number: formattedPhone,
-        email: visitor.email || null,
-        gender,
-        birthday: visitor.birthday || null,
-        visitor_type: visitor.visitorType || visitor.visitor_type || 'first_time',
-        source: visitor.source || null,
-        home_church_name: visitor.homeChurchName || visitor.home_church_name || null,
-        home_church_city: visitor.homeChurchCity || visitor.home_church_city || null,
-        home_church_pastor: visitor.homeChurchPastor || visitor.home_church_pastor || null,
-        notes: visitor.notes || null
-      };
-    });
-
-    const { error } = await supabase
-      .schema('church')
-      .from('visitors')
-      .insert(payload);
-
+    const { error } = await supabase.schema('church').from('visitors').insert(payload);
     if (error) {
-      console.error('Error in bulk insert:', error);
-      return { error: `DB Bulk Insert Error: ${error.message}` };
+      console.error('[visitors] bulk insert failed:', error.code);
+      return { error: GENERIC_SAVE_ERROR };
     }
-
-    revalidatePath(`/${churchSlug}/admin/visitors`);
+    revalidatePath(`/${church.slug}/admin/visitors`);
     return { success: true };
-  } catch (err: any) {
-    console.error('Unhandled exception in bulkAddVisitors:', err);
-    return { error: 'Failed to bulk-add visitors due to application error.' };
+  } catch (err) {
+    console.error('[visitors] bulk failed:', (err as Error).message);
+    return { error: describe(err, 'Failed to import visitors.') };
   }
 }

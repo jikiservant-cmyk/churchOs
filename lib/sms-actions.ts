@@ -1,280 +1,218 @@
+/**
+ * Single-SMS delivery with atomic billing.
+ *
+ * NOT a 'use server' module: callers (API routes, the queue worker) must have
+ * authorised the tenant BEFORE calling. All DB writes use the service-role
+ * client, so never pass an untrusted `churchId`.
+ *
+ * Billing flow (fixes "send first, charge a stale balance later"):
+ *   1. log row (PENDING)           — reused if a previous attempt FAILED
+ *   2. debit_wallet(...)           — atomic, balance check inside the UPDATE
+ *   3. provider call               — Najiki, then Africa's Talking
+ *   4. on any failure              — refund_wallet(...) and mark log FAILED
+ */
+import { randomUUID } from 'crypto';
 import { normalizeUgPhone } from '@/lib/utils';
-// @ts-ignore
-import Africastalking from 'africastalking';
 import { createAdminClient } from '@/lib/supabase/server';
+import { maskPhone } from '@/lib/security';
 
-interface SendSMSParams {
-  supabase: any;
+export interface SendSMSParams {
   phoneNumber: string;
   message: string;
   churchId: string;
   idempotencyKey?: string;
   senderId?: string;
-  balance: {
-    balance: number;
-    sms_rate: number;
+}
+
+export interface SendSMSResult {
+  success: boolean;
+  messageId?: string | null;
+  status?: string | null;
+  error?: string;
+}
+
+const PROVIDER_TIMEOUT_MS = 15_000;
+const SUCCESS_STATUSES = new Set(['success', 'sent', 'queued', 'buffered', 'delivered']);
+export const MAX_SMS_LENGTH = 480;
+
+export class InsufficientBalanceError extends Error {
+  constructor() {
+    super('Insufficient SMS balance');
+    this.name = 'InsufficientBalanceError';
+  }
+}
+
+/** Najiki got the request (or may have) but we cannot tell: never fall back to a second provider. */
+class AmbiguousProviderError extends Error {}
+
+/**
+ * Najiki answers 202 "queued": delivery happens later and its outcome arrives on
+ * /api/najiki/webhook (SMS_DELIVERY_UPDATE), which refunds on failure.
+ * `Idempotency-Key` makes a retry of the same request return the original job
+ * instead of sending a second SMS.
+ */
+async function sendNajikiSMS(to: string, message: string, opts: { senderId?: string; idempotencyKey: string }) {
+  const url = process.env.NAJIKI_API_URL;
+  const key = process.env.NAJIKI_API_KEY;
+  const app = process.env.NAJIKI_APPLICATION_CODE;
+  if (!url || !key || !app) throw new Error('Najiki is not configured');
+
+  let res: Response;
+  try {
+    res = await fetch(`${url.replace(/\/$/, '')}/api/messaging/send`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', 'Idempotency-Key': opts.idempotencyKey },
+      body: JSON.stringify({ to, message, applicationCode: app, ...(opts.senderId ? { from: opts.senderId } : {}) }),
+      signal: AbortSignal.timeout(PROVIDER_TIMEOUT_MS),
+    });
+  } catch (err) {
+    throw new AmbiguousProviderError(`Najiki unreachable: ${(err as Error).message}`);
+  }
+  // 4xx/5xx are definite answers (including 429 from its rate limiter, which runs
+  // before a job is created), so falling back to Africa's Talking cannot duplicate.
+  if (!res.ok) throw new Error(`Najiki API error: ${res.status}`);
+  const json = (await res.json().catch(() => ({}))) as { smsId?: string; status?: string };
+  return { messageId: json.smsId ?? null, status: json.status ?? 'queued' };
+}
+
+/** Africa's Talking REST API (the SDK was dropped: it pulled in vulnerable transitive deps). */
+async function sendAfricasTalkingSMS(to: string, message: string, senderId?: string) {
+  const apiKey = process.env.AT_API_KEY;
+  const username = process.env.AT_USERNAME;
+  if (!apiKey || !username) throw new Error('Africa\'s Talking is not configured');
+
+  const endpoint =
+    username.toLowerCase() === 'sandbox'
+      ? 'https://api.sandbox.africastalking.com/version1/messaging'
+      : 'https://api.africastalking.com/version1/messaging';
+
+  const call = async (from?: string) => {
+    const body = new URLSearchParams({ username, to, message });
+    if (from) body.set('from', from);
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: { apiKey, Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' },
+      body,
+      signal: AbortSignal.timeout(PROVIDER_TIMEOUT_MS),
+    });
+    if (!res.ok) throw new Error(`Africa's Talking API error: ${res.status}`);
+    return (await res.json()) as {
+      SMSMessageData?: { Message?: string; Recipients?: { status: string; messageId?: string }[] };
+    };
   };
+
+  let data = await call(senderId);
+  let recipients = data.SMSMessageData?.Recipients ?? [];
+  if (recipients.length === 0 && senderId && /InvalidSenderId/i.test(data.SMSMessageData?.Message ?? '')) {
+    data = await call(undefined);
+    recipients = data.SMSMessageData?.Recipients ?? [];
+  }
+  if (recipients.length === 0) throw new Error(`Africa's Talking rejected the message: ${data.SMSMessageData?.Message ?? 'no recipients'}`);
+
+  const r = recipients[0];
+  return { messageId: r.messageId ?? null, status: r.status, ok: SUCCESS_STATUSES.has(String(r.status).toLowerCase()) };
 }
 
-// Najiki SMS Sending Function
-async function sendNajikiSMS({
-  phoneNumber,
-  message,
-}: {
-  phoneNumber: string;
-  message: string;
-}) {
-  const najikiApiUrl = process.env.NAJIKI_API_URL;
-  const najikiApiKey = process.env.NAJIKI_API_KEY;
-  const najikiAppCode = process.env.NAJIKI_APPLICATION_CODE;
+export async function sendSingleSMS(params: SendSMSParams): Promise<SendSMSResult> {
+  const { churchId, senderId } = params;
+  const phone = normalizeUgPhone(params.phoneNumber);
+  if (!phone) throw new Error('Invalid phone number format');
+  const message = params.message?.trim();
+  if (!message || message.length > MAX_SMS_LENGTH) throw new Error(`Message must be 1–${MAX_SMS_LENGTH} characters`);
 
-  if (!najikiApiUrl || !najikiApiKey || !najikiAppCode) {
-    throw new Error('Najiki configuration missing from environment variables');
-  }
+  const admin = await createAdminClient();
+  const logs = () => admin.schema('church').from('sms_logs');
+  const idemKey = params.idempotencyKey || `sms_${randomUUID()}`;
 
-  const response = await fetch(`${najikiApiUrl}/api/messaging/send`, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${najikiApiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      to: phoneNumber,
-      message,
-      applicationCode: najikiAppCode,
-    }),
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`Najiki API error: ${response.status} - ${errorText}`);
-  }
-
-  const result = await response.json();
-  return result; // Should have { smsId, reference, status: "queued" }
-}
-
-export async function sendSingleSMS({
-  supabase,
-  phoneNumber,
-  message,
-  churchId,
-  idempotencyKey,
-  senderId,
-  balance
-}: SendSMSParams) {
-  const finalPhone = normalizeUgPhone(phoneNumber);
-  if (!finalPhone) {
-    throw new Error(`Invalid phone number format: "${phoneNumber}"`);
-  }
-
-  const actualIdempotencyKey = idempotencyKey || `sms_${Math.random().toString(36).substring(2, 10)}_${Date.now()}`;
-  
-  // 1. Create Initial "PENDING" Log
-  const { data: initialLog, error: initialLogError } = await supabase
-    .schema('church')
-    .from('sms_logs')
-    .insert({
-      tenant_id: churchId,
-      recipient_phone: finalPhone,
-      body: message,
-      status: 'PENDING',
-      idempotency_key: actualIdempotencyKey
-    })
+  // ── 1. Log row (idempotent; reuse FAILED rows so retries work) ────────────
+  let logId: string;
+  // Stable per log row so a retry after a timeout dedupes at Najiki; fresh only when
+  // Najiki itself reported the previous job as permanently failed.
+  let najikiKeySuffix = '';
+  const { data: inserted, error: insertErr } = await logs()
+    .insert({ tenant_id: churchId, recipient_phone: phone, body: message, status: 'PENDING', idempotency_key: idemKey, sender_id: senderId || null })
     .select('id')
     .single();
 
-  if (initialLogError) {
-    throw new Error(`Database Insert Error: ${initialLogError.message}`);
+  if (inserted) {
+    logId = inserted.id;
+  } else if (insertErr?.code === '23505') {
+    const { data: existing } = await logs().select('id, status, tenant_id, provider_message_id, message_provider_status').eq('idempotency_key', idemKey).maybeSingle();
+    if (!existing || existing.tenant_id !== churchId) throw new Error('Idempotency key conflict');
+    if (SUCCESS_STATUSES.has(String(existing.status).toLowerCase())) {
+      return { success: true, messageId: existing.provider_message_id, status: existing.message_provider_status }; // replay: never send twice
+    }
+    if (existing.status === 'PENDING') throw new Error('SMS is already being processed');
+    // FAILED → retry on the same row. Compare-and-set so only one retry wins.
+    const { data: claimed } = await logs().update({ status: 'PENDING', error_message: null, updated_at: new Date().toISOString() }).eq('id', existing.id).eq('status', existing.status).select('id');
+    if (!claimed?.length) throw new Error('SMS is already being processed');
+    if (String(existing.message_provider_status).toLowerCase() === 'failed') najikiKeySuffix = `-${randomUUID().slice(0, 8)}`;
+    logId = existing.id;
+  } else {
+    console.error('[sms] log insert failed:', insertErr?.code, insertErr?.message);
+    throw new Error('Could not record SMS');
   }
 
-  const logId = initialLog.id;
+  const fail = async (reason: string) => {
+    await logs().update({ status: 'FAILED', error_message: reason.slice(0, 500), updated_at: new Date().toISOString() }).eq('id', logId);
+  };
 
+  // ── 2. Atomic debit (fresh key per attempt so a retry after refund pays again)
+  const { data: wallet } = await admin.from('wallets').select('sms_rate').eq('tenant_id', churchId).maybeSingle();
+  if (!wallet || !(wallet.sms_rate > 0)) {
+    await fail('No billing account');
+    throw new Error('Billing account not found');
+  }
+  const debitKey = `sms:${logId}:${randomUUID().slice(0, 8)}`;
+  const { data: debited, error: debitErr } = await admin.rpc('debit_wallet', {
+    p_tenant_id: churchId,
+    p_amount: wallet.sms_rate,
+    p_idempotency_key: debitKey,
+    p_description: `SMS to ${maskPhone(phone)}`,
+    p_reference_id: logId,
+  });
+  if (debitErr) {
+    console.error('[sms] debit error:', debitErr.code, debitErr.message);
+    await fail('Billing error');
+    throw new Error('Billing error');
+  }
+  if (!debited) {
+    await fail('Insufficient balance');
+    throw new InsufficientBalanceError();
+  }
+
+  // ── 3. Provider (Najiki → Africa's Talking) ───────────────────────────────
+  let outcome: { messageId: string | null; status: string; ok: boolean } | null = null;
+  let providerError = 'Provider unavailable';
   try {
-    // Try Najiki first, fall back to Africa's Talking if Najiki config missing or fails
-    let najikiResult;
-    let providerUsed = 'najiki';
-    try {
-      najikiResult = await sendNajikiSMS({ phoneNumber: finalPhone, message });
-    } catch (najikiError) {
-      console.warn('[SMS Actions] Najiki failed, falling back to Africa\'s Talking:', najikiError);
-      providerUsed = 'africastalking';
+    const r = await sendNajikiSMS(phone, message, { senderId, idempotencyKey: `sms-${logId}${najikiKeySuffix}` });
+    outcome = { ...r, ok: true };
+  } catch (najikiErr) {
+    providerError = (najikiErr as Error).message;
+    if (najikiErr instanceof AmbiguousProviderError) {
+      // Do not also send via Africa's Talking: Najiki may already have queued it.
+      // Refund; a retry reuses the same Idempotency-Key, so it cannot double-send.
+      outcome = null;
+    } else try {
+      outcome = await sendAfricasTalkingSMS(phone, message, senderId);
+      if (!outcome.ok) providerError = `Provider status: ${outcome.status}`;
+    } catch (atErr) {
+      providerError = (atErr as Error).message;
     }
-
-    let isSuccess = false;
-    let finalStatus = 'FAILED';
-    let providerMessageId = null;
-    let providerStatus = null;
-
-    if (providerUsed === 'najiki' && najikiResult) {
-      // Handle Najiki response
-      isSuccess = true;
-      finalStatus = 'Queued';
-      providerMessageId = najikiResult.smsId;
-      providerStatus = najikiResult.status;
-
-      // 2. Perform Deduction
-      const adminSupabase = await createAdminClient();
-      
-      const { data: updatedWallet, error: walletError } = await adminSupabase
-        .from('wallets')
-        .update({ 
-          balance: balance.balance - balance.sms_rate,
-          last_updated: new Date().toISOString()
-        })
-        .eq('tenant_id', churchId)
-        .gte('balance', balance.sms_rate)
-        .select()
-        .single();
-
-      if (walletError || !updatedWallet) {
-        console.error('[SMS Actions] Wallet deduction failed:', walletError);
-        throw new Error('Insufficient SMS balance or wallet update failed');
-      }
-
-      // Record transaction history
-      await adminSupabase.from('wallet_transactions').insert({
-        tenant_id: churchId,
-        amount: -balance.sms_rate,
-        type: 'SMS_SENT',
-        description: `Sent 1 SMS to ${finalPhone} via Najiki`,
-        reference_code: `SMS_${logId}_${Date.now()}`,
-        status: 'success',
-        idempotency_key: logId,
-        product: 'sms',
-        reference_id: logId
-      });
-    } else {
-      // Fallback to Africa's Talking
-      const apiKey = process.env.AT_API_KEY;
-      const username = process.env.AT_USERNAME;
-
-      if (!apiKey || !username) {
-        throw new Error('Service configuration error: AT credentials missing');
-      }
-
-      const africastalking = Africastalking({ apiKey, username });
-      const sms = africastalking.SMS;
-
-      const payload: any = {
-        to: finalPhone,
-        message: message,
-      };
-
-      if (senderId) {
-        payload.from = senderId;
-      }
-
-      let response = await sms.send(payload);
-      let messageData = response.SMSMessageData;
-      let recipients = messageData?.Recipients || [];
-
-      if (recipients.length === 0) {
-        const errorMessage = messageData?.Message || response.Message || '';
-        if (errorMessage.includes('InvalidSenderId') && payload.from) {
-          delete payload.from;
-          response = await sms.send(payload);
-          messageData = response.SMSMessageData;
-          recipients = messageData?.Recipients || [];
-        }
-      }
-
-      if (recipients.length === 0) {
-        const errorMessage = messageData?.Message || response.Message || 'Zero recipients returned from provider';
-        throw new Error(`Africa's Talking API rejection: ${errorMessage}`);
-      }
-
-      const recipient = recipients[0];
-      const successStatuses = ['Success', 'Sent', 'Queued', 'Buffered'];
-      isSuccess = successStatuses.includes(recipient.status);
-
-      if (isSuccess) {
-        if (recipient.status.toLowerCase() === 'success') finalStatus = 'Success';
-        else if (recipient.status.toLowerCase() === 'sent') finalStatus = 'Sent';
-        else if (recipient.status.toLowerCase() === 'queued') finalStatus = 'Queued';
-        else if (recipient.status.toLowerCase() === 'buffered') finalStatus = 'Buffered';
-        else finalStatus = recipient.status;
-      }
-
-      providerMessageId = recipient.messageId;
-      providerStatus = recipient.status;
-
-      // 2. Perform Deduction
-      const adminSupabase = await createAdminClient();
-      
-      const { data: updatedWallet, error: walletError } = await adminSupabase
-        .from('wallets')
-        .update({ 
-          balance: balance.balance - balance.sms_rate,
-          last_updated: new Date().toISOString()
-        })
-        .eq('tenant_id', churchId)
-        .gte('balance', balance.sms_rate)
-        .select()
-        .single();
-
-      if (walletError || !updatedWallet) {
-        console.error('[SMS Actions] Wallet deduction failed:', walletError);
-        throw new Error('Insufficient SMS balance or wallet update failed');
-      }
-
-      // Record transaction history
-      await adminSupabase.from('wallet_transactions').insert({
-        tenant_id: churchId,
-        amount: -balance.sms_rate,
-        type: 'SMS_SENT',
-        description: `Sent 1 SMS to ${finalPhone}`,
-        reference_code: `SMS_${logId}_${Date.now()}`,
-        status: 'success',
-        idempotency_key: logId,
-        product: 'sms',
-        reference_id: logId
-      });
-    }
-
-    // 3. Update Log to Final Status
-    const { error: updateError } = await supabase
-      .schema('church')
-      .from('sms_logs')
-      .update({
-        status: finalStatus,
-        message_provider_status: providerStatus,
-        provider_message_id: providerMessageId,
-        error_message: isSuccess ? null : providerStatus,
-        updated_at: new Date().toISOString()
-      })
-      .eq('id', logId);
-
-    if (updateError) {
-      throw new Error(`Failed to finalize SMS log: ${updateError.message}`);
-    }
-
-    if (isSuccess) {
-      return {
-        success: true,
-        messageId: providerMessageId,
-        status: providerStatus
-      };
-    } else {
-      return {
-        success: false,
-        error: `SMS delivery failed: ${providerStatus}`,
-        details: null
-      };
-    }
-
-  } catch (error: any) {
-    // Update log to FAILED on exception
-    await supabase
-      .schema('church')
-      .from('sms_logs')
-      .update({ 
-        status: 'FAILED', 
-        error_message: error.message || String(error),
-        updated_at: new Date().toISOString()
-      })
-      .eq('id', logId);
-
-    throw error;
   }
+
+  // ── 4. Settle ─────────────────────────────────────────────────────────────
+  if (!outcome || !outcome.ok) {
+    await admin.rpc('refund_wallet', { p_tenant_id: churchId, p_original_key: debitKey });
+    await fail(providerError);
+    return { success: false, error: 'SMS delivery failed' };
+  }
+
+  const { error: finalizeErr } = await logs()
+    .update({ status: 'Queued', message_provider_status: outcome.status, provider_message_id: outcome.messageId, error_message: null, updated_at: new Date().toISOString() })
+    .eq('id', logId);
+  // The message is already sent and paid for; do not throw (a retry would double-send).
+  if (finalizeErr) console.error('[sms] could not finalise log:', finalizeErr.code, finalizeErr.message);
+
+  return { success: true, messageId: outcome.messageId, status: outcome.status };
 }

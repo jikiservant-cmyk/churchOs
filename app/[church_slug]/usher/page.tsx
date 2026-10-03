@@ -14,13 +14,11 @@ export default function UsherEntryPage({ params }: { params: Promise<{ church_sl
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!passkey || passkey.length < 4) return;
+    if (!passkey || passkey.length < 8) return;
 
     setIsLoading(true);
     try {
-      console.log('Attempting login for:', church_slug);
       const result = await validateUsherPasskey(church_slug, passkey);
-      console.log('Login result:', result);
       
       if (result.success) {
         toast.success('Access granted');
@@ -31,7 +29,6 @@ export default function UsherEntryPage({ params }: { params: Promise<{ church_sl
         toast.error(result.error || 'Invalid passkey');
       }
     } catch (error) {
-      console.error('Portal Login Error:', error);
       toast.error('An unexpected error occurred');
     } finally {
       setIsLoading(false);
@@ -55,7 +52,7 @@ export default function UsherEntryPage({ params }: { params: Promise<{ church_sl
               <KeyRound className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-[#9A7E65] opacity-50" />
               <input
                 type="text"
-                maxLength={6}
+                maxLength={8}
                 value={passkey}
                 onChange={(e) => setPasskey(e.target.value.replace(/[^a-zA-Z0-9]/g, '').toUpperCase())}
                 placeholder="XXXXXX"
@@ -66,7 +63,7 @@ export default function UsherEntryPage({ params }: { params: Promise<{ church_sl
             
             <button
               type="submit"
-              disabled={isLoading || passkey.length < 4}
+              disabled={isLoading || passkey.length < 8}
               className="w-full bg-[#B5622A] text-white py-4 rounded-2xl font-black text-[14px] uppercase tracking-widest shadow-lg shadow-[#B5622A]/20 hover:bg-[#944F22] transition-all disabled:opacity-50 disabled:shadow-none flex items-center justify-center gap-3"
             >
               {isLoading ? (

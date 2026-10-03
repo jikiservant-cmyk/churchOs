@@ -11,16 +11,18 @@
  *                           Safe to call concurrently (SKIP LOCKED).
  *   getBroadcastStatus()  — Returns live progress for a given broadcast.
  *
- * Nothing in this file modifies the existing sms/send or sms/broadcast routes.
+ * NOT a 'use server' module. Callers must authorise the tenant first.
  */
 
 import { normalizeUgPhone } from '@/lib/utils';
-import { sendSingleSMS } from '@/lib/sms-actions';
+import { sendSingleSMS, MAX_SMS_LENGTH, InsufficientBalanceError } from '@/lib/sms-actions';
 import { createAdminClient } from '@/lib/supabase/server';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────────────────────────
+
+export const MAX_BROADCAST_RECIPIENTS = 2000;
 
 export interface EnqueueBroadcastParams {
   tenantId: string;
@@ -70,6 +72,12 @@ export interface ProcessResult {
 export async function enqueueBroadcast(
   params: EnqueueBroadcastParams,
 ): Promise<EnqueueResult> {
+  if (params.recipients.length > MAX_BROADCAST_RECIPIENTS) {
+    throw new Error(`Too many recipients (max ${MAX_BROADCAST_RECIPIENTS})`);
+  }
+  if (!params.message?.trim() || params.message.length > MAX_SMS_LENGTH) {
+    throw new Error(`Message must be 1–${MAX_SMS_LENGTH} characters`);
+  }
   const admin = await createAdminClient();
 
   // 1. Create the parent broadcast record
@@ -179,41 +187,20 @@ export async function processQueueBatch(
     return { processed: 0, succeeded: 0, failed: 0 };
   }
 
-  // ── Pre-fetch wallet balances (one query per tenant in this batch) ─────────
-  // FIX: explicitly type as string[] so TypeScript knows tid is a string index key
-  const tenantIds: string[] = [...new Set<string>(claimed.map((r: any) => r.tenant_id as string))];
-  const balanceMap: Record<string, { balance: number; sms_rate: number }> = {};
-
-  for (const tid of tenantIds) {
-    const { data: wallet } = await admin
-      .from('wallets')
-      .select('balance, sms_rate')
-      .eq('tenant_id', tid)
-      .maybeSingle();
-    if (wallet) balanceMap[tid] = wallet;
-  }
-
   // ── Send each claimed item ────────────────────────────────────────────────
   let succeeded = 0;
   let failed    = 0;
 
   for (const item of claimed) {
-    const balance     = balanceMap[item.tenant_id];
     const newAttempts = (item.attempts as number ?? 0) + 1;
 
     try {
-      if (!balance || balance.balance < balance.sms_rate) {
-        throw new Error('Insufficient balance');
-      }
-
       const result = await sendSingleSMS({
-        supabase:       admin,
         phoneNumber:    item.recipient_phone,
         message:        item.message,
         churchId:       item.tenant_id,
         idempotencyKey: item.idempotency_key,
         senderId:       item.sender_id ?? '',
-        balance,
       });
 
       if (!result.success) throw new Error(result.error ?? 'Provider rejected');
@@ -231,16 +218,11 @@ export async function processQueueBatch(
         })
         .eq('id', item.id);
 
-      // Keep local balance in sync to detect insufficiency without an extra DB round-trip
-      balanceMap[item.tenant_id] = {
-        ...balance,
-        balance: balance.balance - balance.sms_rate,
-      };
-
       succeeded++;
 
     } catch (err: any) {
-      const shouldRetry = newAttempts < (item.max_attempts as number ?? 3);
+      // Out of credit will not fix itself in 30 s: fail fast instead of retrying.
+      const shouldRetry = !(err instanceof InsufficientBalanceError) && newAttempts < (item.max_attempts as number ?? 3);
       const nextStatus  = shouldRetry ? 'PENDING' : 'FAILED';
 
       // Exponential back-off: 1st retry in 30 s, 2nd in 60 s, 3rd = permanent fail
@@ -254,7 +236,7 @@ export async function processQueueBatch(
         .update({
           status:       nextStatus,
           attempts:     newAttempts,
-          last_error:   err.message ?? String(err),
+          last_error:   String(err?.message ?? err).slice(0, 300),
           scheduled_at: retryDelay ?? new Date().toISOString(),
           updated_at:   new Date().toISOString(),
         })

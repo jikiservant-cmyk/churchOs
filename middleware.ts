@@ -1,58 +1,120 @@
 import { createServerClient } from '@supabase/ssr';
 import { NextResponse, type NextRequest } from 'next/server';
+import { INVITE_COOKIE, INVITE_RE, denominationsEnabled } from '@/lib/denominations';
+
+/**
+ * Edge middleware: session refresh + coarse gating + CSRF origin check.
+ *
+ * This is DEFENCE IN DEPTH only. Authorisation lives in the data access layer
+ * (lib/auth/tenant.ts) and in RLS — never rely on middleware or layouts alone.
+ */
+
+// Routes called by third parties / cron with their own secret. No browser origin.
+const ORIGIN_EXEMPT_API = ['/api/najiki/webhook', '/api/sms/process-queue'];
+
+const ADMIN_PATH = /^\/[^/]+\/admin(?:\/|$)/;
+const OVERSEER_PATH = /^\/overseer(?:\/|$)/;
+const ADMIN_LOGIN_PATH = /^\/[^/]+\/admin\/login\/?$/;
+
+function sessionCookie(options: Record<string, unknown>) {
+  const crossSite = process.env.ALLOW_CROSS_SITE_COOKIES === 'true';
+  return {
+    ...options,
+    sameSite: crossSite ? ('none' as const) : ('lax' as const),
+    secure: crossSite || process.env.NODE_ENV === 'production',
+  };
+}
+
+function originAllowed(request: NextRequest): boolean {
+  const origin = request.headers.get('origin');
+  if (!origin) {
+    const site = request.headers.get('sec-fetch-site');
+    return site === 'same-origin' || site === 'none';
+  }
+  const host = request.headers.get('x-forwarded-host') || request.headers.get('host');
+  const allowed = new Set<string>();
+  if (host) {
+    allowed.add(`https://${host}`);
+    allowed.add(`http://${host}`);
+  }
+  for (const v of [process.env.NEXT_PUBLIC_APP_URL, process.env.APP_URL, ...(process.env.ALLOWED_ORIGINS || '').split(',')]) {
+    const t = v?.trim().replace(/\/+$/, '');
+    if (t) allowed.add(t);
+  }
+  return allowed.has(origin.replace(/\/+$/, ''));
+}
+
+/** `/signup?invite=CODE` → short-lived httpOnly cookie read by provisionTenant (no UI needed). */
+function rememberInvite(request: NextRequest, response: NextResponse) {
+  if (!denominationsEnabled() || !request.nextUrl.pathname.startsWith('/signup')) return;
+  const code = request.nextUrl.searchParams.get('invite');
+  if (code && INVITE_RE.test(code)) {
+    response.cookies.set(INVITE_COOKIE, code, { httpOnly: true, sameSite: 'lax', secure: process.env.NODE_ENV === 'production', path: '/', maxAge: 60 * 60 * 24 });
+  }
+}
 
 export async function middleware(request: NextRequest) {
-  let supabaseResponse = NextResponse.next({
-    request,
-  });
+  const response = await handle(request);
+  rememberInvite(request, response);
+  return response;
+}
 
-  // Skip Supabase auth check if env vars are missing (for local dev without Supabase)
-  if (!process.env.NEXT_PUBLIC_SUPABASE_URL || !process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY) {
+async function handle(request: NextRequest) {
+  const { pathname } = request.nextUrl;
+  const method = request.method.toUpperCase();
+
+  // CSRF: state-changing API calls must come from our own origin.
+  if (
+    pathname.startsWith('/api/') &&
+    !['GET', 'HEAD', 'OPTIONS'].includes(method) &&
+    !ORIGIN_EXEMPT_API.some((p) => pathname === p) &&
+    !originAllowed(request)
+  ) {
+    return NextResponse.json({ error: 'Cross-origin request blocked' }, { status: 403 });
+  }
+
+  let supabaseResponse = NextResponse.next({ request });
+
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  if (!url || !key) {
+    if (process.env.NODE_ENV === 'production' && ((ADMIN_PATH.test(pathname) && !ADMIN_LOGIN_PATH.test(pathname)) || OVERSEER_PATH.test(pathname))) {
+      return new NextResponse('Service unavailable', { status: 503 });
+    }
     return supabaseResponse;
   }
 
-  const supabase = createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
-    {
-      cookies: {
-        getAll() {
-          return request.cookies.getAll();
-        },
-        setAll(cookiesToSet) {
-          cookiesToSet.forEach(({ name, value, options }) => request.cookies.set(name, value));
-          supabaseResponse = NextResponse.next({
-            request,
-          });
-          cookiesToSet.forEach(({ name, value, options }) =>
-            supabaseResponse.cookies.set(name, value, { ...options, sameSite: 'none', secure: true })
-          );
-        },
+  const supabase = createServerClient(url, key, {
+    cookies: {
+      getAll() {
+        return request.cookies.getAll();
       },
-    }
-  );
+      setAll(cookiesToSet) {
+        cookiesToSet.forEach(({ name, value }) => request.cookies.set(name, value));
+        supabaseResponse = NextResponse.next({ request });
+        cookiesToSet.forEach(({ name, value, options }) =>
+          supabaseResponse.cookies.set(name, value, sessionCookie(options as Record<string, unknown>)),
+        );
+      },
+    },
+  });
 
-  // Refresh session if expired
   try {
+    // getUser() validates the JWT with Supabase Auth (getSession() would not).
     const { data: { user } } = await supabase.auth.getUser();
 
-    // Protective Routing for Admin
-    const url = new URL(request.url);
-    const pathParts = url.pathname.split('/');
-    
-    // Check if we are in an admin route: /[slug]/admin/...
-    if (pathParts.length >= 3 && pathParts[2] === 'admin' && pathParts[3] !== 'login') {
-      if (!user) {
-        return NextResponse.redirect(new URL(`/?error=Session Expired`, request.url));
-      }
-      
-      // We can't easily check the DB in middleware without a performance hit, 
-      // but we can at least ensure the user exists.
-      // The Layout will still do the fine-grained role/church check, 
-      // but the middleware will catch the most common "unauthenticated" case.
+    if ((ADMIN_PATH.test(pathname) && !ADMIN_LOGIN_PATH.test(pathname) || OVERSEER_PATH.test(pathname)) && !user) {
+      const dest = request.nextUrl.clone();
+      dest.pathname = '/';
+      dest.search = '?error=Session%20Expired';
+      return NextResponse.redirect(dest);
     }
   } catch (e) {
-    console.error("Middleware Auth Error:", e);
+    console.error('[middleware] auth check failed:', (e as Error).message);
+    // Fail closed for admin routes if Auth is unreachable.
+    if ((ADMIN_PATH.test(pathname) && !ADMIN_LOGIN_PATH.test(pathname)) || OVERSEER_PATH.test(pathname)) {
+      return new NextResponse('Service unavailable', { status: 503 });
+    }
   }
 
   return supabaseResponse;

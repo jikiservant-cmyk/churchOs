@@ -1,160 +1,151 @@
 import { NextResponse } from 'next/server';
-import { createClient } from '@supabase/supabase-js';
 import { revalidatePath } from 'next/cache';
-import crypto from 'crypto';
+import { createAdminClient } from '@/lib/supabase/server';
+import { verifyNajikiSignature, classifyNajikiPayload } from '@/lib/najiki';
 
 export const dynamic = 'force-dynamic';
 
-function getServiceDb() {
-  return createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-  );
-}
+const MAX_BODY_BYTES = 64 * 1024;
 
+/**
+ * Najiki notification webhook (payments AND SMS delivery updates share this URL;
+ * set the Najiki Application's webhookPath to `/api/najiki/webhook`).
+ *
+ *  - Fails CLOSED: with no signing secret configured every request is rejected.
+ *  - Verifies Najiki's `X-Najiki-Signature: t=<ms>,v=<hmac>` (HMAC-SHA256 over
+ *    "<ms>.<rawBody>"), constant-time. See lib/najiki.ts.
+ *  - Payments: matched by the reference we sent in externalEntityId / metadata.
+ *    Credits the amount recorded at initiation (inside `apply_topup`), never the
+ *    payload's number; an amount mismatch parks the transaction for review.
+ *  - SMS: 'failed' refunds the debit exactly once; 'delivered' updates the log.
+ *  - Idempotent: replays never touch the wallet twice.
+ *  - Payloads (phone numbers, ids) are never logged.
+ */
 export async function POST(request: Request) {
+  const secrets = [process.env.NAJIKI_WEBHOOK_SECRET, process.env.NAJIKI_API_KEY].filter((x): x is string => !!x);
+  if (secrets.length === 0) {
+    console.error('[najiki-webhook] no signing secret configured; rejecting');
+    return NextResponse.json({ error: 'Webhook not configured' }, { status: 503 });
+  }
+
+  const rawBody = await request.text();
+  if (Buffer.byteLength(rawBody) > MAX_BODY_BYTES) {
+    return NextResponse.json({ error: 'Payload too large' }, { status: 413 });
+  }
+
+  const verified = verifyNajikiSignature({
+    secrets,
+    rawBody,
+    signatureHeader: request.headers.get('x-najiki-signature'),
+    timestampHeader: request.headers.get('x-najiki-timestamp'),
+  });
+  if (!verified) {
+    console.warn('[najiki-webhook] signature verification failed');
+    return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+  }
+
+  let payload: Record<string, unknown>;
   try {
-    // 1. Read raw body for signature verification
-    const rawBody = await request.text();
-    console.log('[Najiki Webhook] Raw payload received:', rawBody.substring(0, 200));
+    const parsed = JSON.parse(rawBody);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not an object');
+    payload = parsed as Record<string, unknown>;
+  } catch {
+    return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 });
+  }
 
-    // 2. Verify Najiki webhook signature
-    const apiKey = process.env.NAJIKI_API_KEY;
-    const incomingSig = request.headers.get('x-najiki-signature') || '';
+  const event = classifyNajikiPayload(payload);
+  if (event.kind === 'ignored') return NextResponse.json({ received: true });
 
-    if (apiKey) {
-      const expectedSig = crypto
-        .createHmac('sha256', apiKey)
-        .update(rawBody)
-        .digest('hex');
+  try {
+    const db = await createAdminClient();
 
-      if (
-        expectedSig.length !== incomingSig.length ||
-        !crypto.timingSafeEqual(Buffer.from(expectedSig), Buffer.from(incomingSig))
-      ) {
-        console.error('[Najiki Webhook] Invalid signature — rejected');
-        return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    // ── SMS delivery updates ───────────────────────────────────────────────
+    if (event.kind === 'sms') {
+      const logs = () => db.schema('church').from('sms_logs');
+      const { data: log } = await logs().select('id, tenant_id, status').eq('provider_message_id', event.smsId).maybeSingle();
+      if (!log) return NextResponse.json({ received: true }); // not ours (or already purged)
+
+      if (event.outcome === 'delivered') {
+        await logs()
+          .update({ status: 'Delivered', message_provider_status: 'delivered', updated_at: new Date().toISOString() })
+          .eq('id', log.id)
+          .eq('status', 'Queued');
+        return NextResponse.json({ received: true });
       }
-    } else {
-      console.warn('[Najiki Webhook] NAJIKI_API_KEY not set — skipping signature verification (not recommended!)');
-    }
 
-    // 3. Parse the payload
-    let payload: any;
-    try {
-      payload = JSON.parse(rawBody);
-    } catch (parseErr) {
-      console.error('[Najiki Webhook] Failed to parse JSON:', parseErr);
-      return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 });
-    }
-
-    console.log('[Najiki Webhook] Parsed payload:', JSON.stringify(payload, null, 2));
-
-    // Extract key fields from Najiki payload
-    const { paymentIntentId, reference, status, amount, externalEntityId, providerPaymentId, failureReason, tenantCode } = payload;
-
-    const db = getServiceDb();
-
-    // Resolve tenant using tenantCode if available
-    let resolvedTenantId: string | null = null;
-    if (tenantCode) {
-      const { data: tenant, error: tenantError } = await db
-        .from('tenants')
-        .select('id')
-        .eq('code', tenantCode)
-        .maybeSingle();
-
-      if (!tenantError && tenant) {
-        resolvedTenantId = tenant.id;
-        console.log('[Najiki Webhook] Resolved tenant via tenantCode:', tenantCode, '→', tenant.id);
-      }
-    }
-
-    // Find transaction by either reference or paymentIntentId (we stored reference = idempotencyKey initially)
-    let { data: tx, error: txError } = await db
-      .from('wallet_transactions')
-      .select('*')
-      .or(`reference_code.eq.${reference},reference_id.eq.${reference},idempotency_key.eq.${paymentIntentId}`)
-      .maybeSingle();
-
-    if (txError) {
-      console.error('[Najiki Webhook] DB lookup error:', txError);
-      return NextResponse.json({ error: 'DB Error' }, { status: 500 });
-    }
-
-    if (!tx) {
-      console.warn('[Najiki Webhook] Transaction not found for reference:', reference, 'or paymentIntentId:', paymentIntentId);
-      return NextResponse.json({ received: true }, { status: 200 });
-    }
-
-    // Handle success
-    if (status === 'success') {
-      // Use existing process_topup_webhook RPC if available, otherwise handle manually
-      try {
-        // Try to use the existing RPC
-        const { data: rpcResult, error: rpcErr } = await db.rpc('process_topup_webhook', {
-          p_reference: reference,
-          p_tenant_id: resolvedTenantId || tx.tenant_id,
-          p_amount: amount,
-          p_payload: payload
-        });
-
-        if (rpcErr) {
-          console.warn('[Najiki Webhook] process_topup_webhook RPC failed, falling back to manual:', rpcErr);
-          // Fallback to manual processing
-          await handleSuccessManually(db, tx, payload, resolvedTenantId);
+      // Failed after Najiki accepted it: give the money back, once.
+      if (String(log.status).toUpperCase() !== 'FAILED') {
+        const { data: debit } = await db
+          .from('wallet_transactions')
+          .select('idempotency_key')
+          .eq('tenant_id', log.tenant_id)
+          .eq('reference_id', log.id)
+          .eq('type', 'SMS_SENT')
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        if (debit?.idempotency_key) {
+          const { error: refundErr } = await db.rpc('refund_wallet', { p_tenant_id: log.tenant_id, p_original_key: debit.idempotency_key });
+          if (refundErr) {
+            console.error('[najiki-webhook] refund failed:', refundErr.code, refundErr.message);
+            return NextResponse.json({ error: 'Processing error' }, { status: 500 }); // Najiki retries
+          }
         } else {
-          console.log('[Najiki Webhook] RPC succeeded:', rpcResult);
+          console.error('[najiki-webhook] failed SMS has no debit to refund');
         }
-
+        await logs()
+          .update({ status: 'FAILED', message_provider_status: 'failed', error_message: (event.error ?? 'Delivery failed').slice(0, 300), updated_at: new Date().toISOString() })
+          .eq('id', log.id);
         revalidatePath('/', 'layout');
-        console.log('[Najiki Webhook] ✅ Success! Wallet credited. Tenant:', resolvedTenantId || tx.tenant_id, 'Amount:', amount);
-        return NextResponse.json({ received: true });
-
-      } catch (fallbackErr) {
-        await handleSuccessManually(db, tx, payload, resolvedTenantId);
-        revalidatePath('/', 'layout');
-        return NextResponse.json({ received: true });
       }
-
-    } else if (status === 'failed') {
-      // Mark as failed
-      await db
-        .from('wallet_transactions')
-        .update({
-          status: 'failed',
-          provider_payload: payload
-        })
-        .eq('id', tx.id);
-
-      console.log('[Najiki Webhook] ❌ Payment failed:', failureReason, 'Reference:', reference);
-      return NextResponse.json({ received: true });
-
-    } else {
-      console.log('[Najiki Webhook] ⏳ Payment still pending:', status);
       return NextResponse.json({ received: true });
     }
+
+    // ── Payment notifications ──────────────────────────────────────────────
+    let reference = event.reference ?? '';
+    if (!reference && event.paymentId) {
+      const { data } = await db.from('wallet_transactions').select('reference_code').eq('idempotency_key', event.paymentId).maybeSingle();
+      reference = data?.reference_code ?? '';
+    }
+    if (!reference || !reference.startsWith('CHURCH-')) {
+      // Success we cannot match is money without a wallet: shout, but ack (retrying cannot help).
+      console.error(`[najiki-webhook] unmatched ${event.outcome} notification; needs manual reconciliation`);
+      return NextResponse.json({ received: true });
+    }
+
+    if (event.outcome === 'success') {
+      if (event.currency && event.currency !== 'UGX') {
+        console.error('[najiki-webhook] non-UGX success notification; not crediting');
+        return NextResponse.json({ received: true });
+      }
+      if (event.amount !== null && (!Number.isInteger(event.amount) || event.amount <= 0)) {
+        return NextResponse.json({ error: 'Invalid amount' }, { status: 400 });
+      }
+
+      const { data: outcome, error } = await db.rpc('apply_topup', {
+        p_reference: reference,
+        p_amount: event.amount,
+        p_payload: payload,
+      });
+      if (error) {
+        console.error('[najiki-webhook] apply_topup failed:', error.code, error.message);
+        return NextResponse.json({ error: 'Processing error' }, { status: 500 }); // Najiki will retry
+      }
+      if (outcome === 'amount_mismatch') console.error('[najiki-webhook] amount mismatch; transaction parked for review');
+      if (outcome === 'not_found' || outcome === 'invalid_state') console.error(`[najiki-webhook] apply_topup returned ${outcome}; needs manual reconciliation`);
+      if (outcome === 'credited') revalidatePath('/', 'layout');
+      return NextResponse.json({ received: true });
+    }
+
+    await db
+      .from('wallet_transactions')
+      .update({ status: 'failed', provider_payload: payload })
+      .eq('reference_code', reference)
+      .eq('type', 'TOPUP')
+      .eq('status', 'pending'); // never downgrade a credited transaction
+    return NextResponse.json({ received: true });
   } catch (err) {
-    console.error('[Najiki Webhook] Unhandled error:', err);
+    console.error('[najiki-webhook] unhandled error:', (err as Error).message);
     return NextResponse.json({ error: 'Internal Server Error' }, { status: 500 });
   }
-}
-
-async function handleSuccessManually(db: any, tx: any, payload: any, resolvedTenantId: string | null) {
-  // 1. Increment wallet balance
-  await db.rpc('increment_wallet_balance', {
-    p_tenant_id: resolvedTenantId || tx.tenant_id,
-    p_amount: tx.amount
-  });
-
-  // 2. Mark transaction as successful
-  await db
-    .from('wallet_transactions')
-    .update({
-      status: 'success',
-      provider_payload: payload
-    })
-    .eq('id', tx.id);
-
-  console.log('[Najiki Webhook] Manual processing successful');
 }

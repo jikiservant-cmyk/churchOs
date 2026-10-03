@@ -2,8 +2,7 @@
 
 ## 1. Run the migration
 
-Paste `sql/sms_queue_migration.sql` into your **Supabase SQL Editor** and click
-Run. It creates two new tables (`church.broadcasts`, `church.sms_queue`) and a
+Apply `supabase/migrations/20261001000000_security_hardening.sql` (after `supabase-schema.sql`) in your **Supabase SQL Editor**. It creates two new tables (`church.broadcasts`, `church.sms_queue`) and a
 Postgres function (`public.claim_sms_queue_batch`) used for atomic batch claiming.
 
 ---
@@ -12,8 +11,10 @@ Postgres function (`public.claim_sms_queue_batch`) used for atomic batch claimin
 
 ```
 # .env.local
+# Required for the scheduler endpoint; it is DISABLED (503) when neither is set. >= 16 chars.
 QUEUE_PROCESSOR_SECRET=replace_with_a_long_random_string
-NEXT_PUBLIC_APP_URL=https://your-deployed-url.com   # needed for fire-and-forget trigger
+CRON_SECRET=                                       # Vercel Cron sends this as a Bearer token
+NEXT_PUBLIC_APP_URL=https://your-deployed-url.com
 ```
 
 ---
@@ -32,6 +33,9 @@ Create `vercel.json` in the project root:
   ]
 }
 ```
+
+`/api/sms/enqueue` and the attendance "missed you" action deliver the first batch in-process
+(`after()`); they no longer call this endpoint over HTTP.
 
 The cron fires every minute and picks up any items that weren't processed
 by the immediate trigger (network hiccups, retries after back-off, etc.).
@@ -53,13 +57,8 @@ by the immediate trigger (network hiccups, retries after back-off, etc.).
       message,
       churchId,
 +     audience,               // pass the audience string too (optional but useful for history)
-      recipients: finalMembers
-        .map(m => ({
-+         id: m.id,           // now required for idempotency key generation
-          full_name: m.full_name,
-          phone_number: normalizeUgPhone(m.phone_number)
-        }))
-        .filter(m => m.phone_number !== null)
+      // Only ids are sent. The server looks up names/phone numbers itself.
+      recipients: finalMembers.map(m => ({ id: m.id, source: m.source })),
     })
   });
 ```
@@ -113,7 +112,7 @@ BroadcastComposer
   │    ├── enqueueBroadcast()
   │    │     creates church.broadcasts row
   │    │     inserts N rows into church.sms_queue
-  │    ├── fire-and-forget POST /api/sms/process-queue
+  │    ├── after() → processQueueBatch() in-process
   │    └── returns { broadcastId, enqueued }
   │
   └── polls GET /api/sms/broadcast-status/:id  every 2 s
@@ -128,11 +127,10 @@ BroadcastComposer
 
 ---
 
-## Existing routes — unchanged
+## Existing routes
 
-| Route                        | Status       |
-| ---------------------------- | ------------ |
-| `POST /api/sms/broadcast`    | Untouched ✅ |
-| `POST /api/sms/send`         | Untouched ✅ |
-| `lib/sms-actions.ts`         | Untouched ✅ |
-| `supabase-schema.sql`        | Untouched ✅ |
+| Route                        | Notes |
+| ---------------------------- | ----- |
+| `POST /api/sms/broadcast`    | Streams inline for <= 300 recipients (ids only, admin-authenticated). Larger sends must use `/api/sms/enqueue`. |
+| `POST /api/sms/send`         | Single SMS, admin-authenticated, tenant taken from the caller's profile. |
+| `lib/sms-actions.ts`         | Debit-before-send with refund on failure. |

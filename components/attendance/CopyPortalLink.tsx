@@ -1,21 +1,19 @@
 'use client';
 
 import { useState } from 'react';
-import { Copy, Check, Share2, Activity } from 'lucide-react';
+import { Copy, Check, Activity } from 'lucide-react';
 import { toast } from 'sonner';
 
 interface CopyPortalLinkProps {
   churchSlug: string;
-  passkey: string;
 }
 
-export function CopyPortalLink({ churchSlug, passkey }: CopyPortalLinkProps) {
+export function CopyPortalLink({ churchSlug }: CopyPortalLinkProps) {
   const [copied, setCopied] = useState(false);
-  const [passkeyCopied, setPasskeyCopied] = useState(false);
 
   const portalUrl = `${typeof window !== 'undefined' ? window.location.origin : ''}/${churchSlug}/usher`;
 
-  const copyToClipboard = async (text: string, isPasskey: boolean = false) => {
+  const copyToClipboard = async (text: string) => {
     try {
       if (navigator.clipboard && window.isSecureContext) {
         await navigator.clipboard.writeText(text);
@@ -32,23 +30,15 @@ export function CopyPortalLink({ churchSlug, passkey }: CopyPortalLinkProps) {
         document.body.removeChild(textArea);
       }
       
-      if (isPasskey) {
-        setPasskeyCopied(true);
-        toast.success('Passkey copied');
-        setTimeout(() => setPasskeyCopied(false), 2000);
-      } else {
-        setCopied(true);
-        toast.success('Link copied');
-        setTimeout(() => setCopied(false), 2000);
-      }
-    } catch (err) {
-      console.error('Copy failed:', err);
+      setCopied(true);
+      toast.success('Link copied');
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
       toast.error('Failed to copy');
     }
   };
 
   const handleCopy = () => copyToClipboard(portalUrl);
-  const handleCopyPasskey = () => copyToClipboard(passkey, true);
 
   const handleOpen = () => {
     window.open(portalUrl, '_blank');
@@ -56,18 +46,6 @@ export function CopyPortalLink({ churchSlug, passkey }: CopyPortalLinkProps) {
 
   return (
     <div className="flex items-center gap-2">
-      <button 
-        onClick={handleCopyPasskey}
-        className="flex flex-col items-end px-3 py-1 bg-[#FAF7F0] border border-[#E9E1D2] rounded-xl hover:bg-[#F5F1E8] transition-colors group relative"
-        title="Click to copy passkey"
-      >
-        <span className="text-[8px] font-black uppercase tracking-widest text-[#9A7E65]">Passkey</span>
-        <div className="flex items-center gap-1">
-          <span className="text-[12px] font-black text-[#B5622A] tracking-[0.2em]">{passkey}</span>
-          {passkeyCopied ? <Check className="w-2.5 h-2.5 text-[#B5622A]" /> : <Copy className="w-2.5 h-2.5 text-[#9A7E65] opacity-0 group-hover:opacity-100 transition-opacity" />}
-        </div>
-      </button>
-      
       <button
         onClick={handleCopy}
         className="flex items-center gap-2 px-4 py-2 bg-[#B5622A] text-white rounded-xl text-[11px] font-black uppercase tracking-widest hover:bg-[#944F22] shadow-md transition-all active:scale-95"

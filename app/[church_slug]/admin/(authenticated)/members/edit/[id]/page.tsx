@@ -1,4 +1,5 @@
-import { createClient } from '@/lib/supabase/server';
+import { requireTenantAdmin } from '@/lib/auth/tenant';
+import { isUuid } from '@/lib/security';
 import { notFound } from 'next/navigation';
 import { editMember } from '../../actions';
 import SubmitButton from '@/components/SubmitButton';
@@ -7,7 +8,8 @@ export default async function EditMemberPage(props: {
   params: Promise<{ church_slug: string; id: string }>;
 }) {
   const resolvedParams = await props.params;
-  const supabase = await createClient();
+  if (!isUuid(resolvedParams.id)) notFound();
+  const { church, supabase } = await requireTenantAdmin(resolvedParams.church_slug);
 
   // Fetch the specific member
   const { data: member, error } = await supabase
@@ -15,6 +17,7 @@ export default async function EditMemberPage(props: {
     .from('members')
     .select('*')
     .eq('id', resolvedParams.id)
+    .eq('church_id', church.id)
     .maybeSingle();
 
   if (!member || error) {

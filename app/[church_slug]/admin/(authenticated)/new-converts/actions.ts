@@ -1,181 +1,114 @@
 'use server';
 
-import { createClient, createAdminClient } from '@/lib/supabase/server';
 import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
+import { assertTenantAdmin, AuthError } from '@/lib/auth/tenant';
 import { normalizeUgPhone } from '@/lib/utils';
+import { field, slugField, uuidField, text, checkBulk, isRedirectError, GENERIC_SAVE_ERROR } from '@/lib/form-utils';
 
-async function checkChurchAdminAuth(churchSlug: string) {
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) throw new Error('Unauthenticated');
-
-  const adminSupabase = await createAdminClient();
-  const { data: church } = await adminSupabase.schema('church').from('churches').select('id').eq('slug', churchSlug).single();
-  if (!church) throw new Error('Church not found');
-
-  const { data: profile } = await adminSupabase.from('admin_profiles').select('tenant_id').eq('id', user.id).eq('tenant_id', church.id).single();
-  if (!profile) throw new Error('Unauthorized to perform this action for this church');
-
-  return { supabase, user, churchId: church.id };
+function back(slug: string | null, path: string, error: string): never {
+  const q = new URLSearchParams({ error }).toString();
+  redirect(slug ? `/${slug}/admin/${path}?${q}` : `/?${q}`);
 }
 
+const describe = (err: unknown, fallback: string) => (err instanceof AuthError ? err.message : fallback);
+
 export async function addNewConvert(formData: FormData) {
-  let searchParams = '';
-  
-  const name = formData.get('name') as string;
-  const contact = formData.get('contact') as string;
-  const churchSlug = formData.get('churchSlug') as string;
-  
+  const slug = slugField(formData);
+  let error = '';
+
   try {
-    const { supabase, churchId: finalChurchId } = await checkChurchAdminAuth(churchSlug);
+    const { supabase, church } = await assertTenantAdmin(slug ?? '');
+    const name = field(formData, 'name', 120);
+    const contact = field(formData, 'contact', 64);
+    if (!name) back(church.slug, 'new-converts', 'Name is required.');
 
-    let finalContact = contact.trim();
-    let hasConflict = false;
-
-    // Try to normalize as phone for conflict checks, but if it's not a valid phone, just use the raw input
-    let normalizedPhone = null;
-    if (finalContact) {
-      normalizedPhone = normalizeUgPhone(finalContact);
-      
-      if (normalizedPhone) {
-        // Only check for conflicts if it's a valid phone number
-        // Check if phone number already exists in members
-        const { data: existingMember } = await supabase
-          .schema('church')
-          .from('members')
-          .select('id')
-          .eq('church_id', finalChurchId)
-          .eq('phone_number', normalizedPhone)
-          .maybeSingle();
-
-        if (existingMember) {
-          hasConflict = true;
-        }
-
-        if (!hasConflict) {
-          // Check if phone number already exists in new_converts
-          const { data: existingConvert } = await supabase
-            .schema('church')
-            .from('new_converts')
-            .select('id')
-            .eq('church_id', finalChurchId)
-            .eq('contact', normalizedPhone)
-            .maybeSingle();
-          
-          if (existingConvert) {
-            hasConflict = true;
-          }
-        }
-      }
+    // Only de-duplicate when the contact is a valid phone number.
+    let duplicate = false;
+    const phone = contact ? normalizeUgPhone(contact) : null;
+    if (phone) {
+      const [{ data: m }, { data: c }] = await Promise.all([
+        supabase.schema('church').from('members').select('id').eq('church_id', church.id).eq('phone_number', phone).limit(1).maybeSingle(),
+        supabase.schema('church').from('new_converts').select('id').eq('church_id', church.id).eq('contact', phone).limit(1).maybeSingle(),
+      ]);
+      duplicate = !!(m || c);
     }
 
-    if (!hasConflict) {
-      // Save the raw contact input, not just normalized phone!
-      const payload = {
-        church_id: finalChurchId,
-        name: name.trim(),
-        contact: finalContact || null,
-      };
-
-      const { error } = await supabase
+    if (!duplicate) {
+      const { error: dbErr } = await supabase
         .schema('church')
         .from('new_converts')
-        .insert(payload);
-
-      if (error) {
-        console.error('Error adding new convert:', error);
-        searchParams = new URLSearchParams({
-          error: `DB Insert Error: ${error.message}${error.details ? ` (${error.details})` : ''}`,
-        }).toString();
+        .insert({ church_id: church.id, name, contact: contact || null });
+      if (dbErr) {
+        console.error('[new-converts] insert failed:', dbErr.code);
+        error = GENERIC_SAVE_ERROR;
       }
     }
-  } catch (err: any) {
-    console.error('Unhandled exception in addNewConvert:', err);
-    if (err.message === 'NEXT_REDIRECT') throw err;
-    searchParams = new URLSearchParams({ error: 'Failed to add new convert due to application error.' }).toString();
+    if (!error) revalidatePath(`/${church.slug}/admin/new-converts`);
+  } catch (err) {
+    if (isRedirectError(err)) throw err;
+    console.error('[new-converts] add failed:', (err as Error).message);
+    error = describe(err, 'Failed to add new convert.');
   }
 
-  if (searchParams) {
-    redirect(`/${churchSlug}/admin/new-converts?${searchParams}`);
-  }
-
-  revalidatePath(`/${churchSlug}/admin/new-converts`);
+  if (error) back(slug, 'new-converts', error);
 }
 
 export async function editNewConvert(formData: FormData) {
-  const churchSlug = formData.get('churchSlug') as string;
-  const convertId = formData.get('convertId') as string;
-  const name = formData.get('name') as string;
-    const contact = formData.get('contact') as string;
-  let searchParams = '';
+  const slug = slugField(formData);
+  const convertId = uuidField(formData, 'convertId');
+  let error = '';
 
   try {
-    const { supabase } = await checkChurchAdminAuth(churchSlug);
+    const { supabase, church } = await assertTenantAdmin(slug ?? '');
+    if (!convertId) back(church.slug, 'new-converts', 'Invalid record.');
+    const name = field(formData, 'name', 120);
+    if (!name) back(church.slug, `new-converts/edit/${convertId}`, 'Name is required.');
 
-    const payload = {
-      name,
-      contact,
-    };
-
-    const { error } = await supabase
+    const { error: dbErr } = await supabase
       .schema('church')
       .from('new_converts')
-      .update(payload)
-      .eq('id', convertId);
+      .update({ name, contact: field(formData, 'contact', 64) })
+      .eq('id', convertId)
+      .eq('church_id', church.id);
 
-    if (error) {
-      console.error('Error updating new convert:', error);
-      searchParams = new URLSearchParams({
-        error: `DB Update Error: ${error.message}`,
-      }).toString();
+    if (dbErr) {
+      console.error('[new-converts] update failed:', dbErr.code);
+      error = GENERIC_SAVE_ERROR;
+    } else {
+      revalidatePath(`/${church.slug}/admin/new-converts`);
+      redirect(`/${church.slug}/admin/new-converts`);
     }
-  } catch (err: any) {
-    console.error('Unhandled exception in editNewConvert:', err);
-    if (err.message === 'NEXT_REDIRECT') {
-      throw err;
-    }
-    searchParams = new URLSearchParams({ error: 'Failed to update convert.' }).toString();
+  } catch (err) {
+    if (isRedirectError(err)) throw err;
+    console.error('[new-converts] edit failed:', (err as Error).message);
+    error = describe(err, 'Failed to update convert.');
   }
 
-  if (searchParams) {
-    redirect(`/${churchSlug}/admin/new-converts/edit/${convertId}?${searchParams}`);
-  }
-
-  revalidatePath(`/${churchSlug}/admin/new-converts`);
-  redirect(`/${churchSlug}/admin/new-converts`);
+  if (error) back(slug, convertId ? `new-converts/edit/${convertId}` : 'new-converts', error);
 }
 
-export async function bulkAddNewConverts(churchSlug: string, convertsData: any[]) {
+export async function bulkAddNewConverts(churchSlug: string, convertsData: unknown[]) {
   try {
-    const { supabase, churchId: finalChurchId } = await checkChurchAdminAuth(churchSlug);
+    const bad = checkBulk(convertsData);
+    if (bad) return { error: bad };
+    const { supabase, church } = await assertTenantAdmin(churchSlug);
 
-    const payload = convertsData.map((convert) => {
-       let rawContact = convert.contact || convert.phone || convert.phone_number || '';
-       let finalContact = rawContact.trim() || null;
-       
-       // No need to normalize for bulk insert, just save the raw contact
-       return {
-         church_id: finalChurchId,
-         name: String(convert.name || convert.full_name || convert.fullName || 'Unknown').trim(),
-         contact: finalContact,
-       };
-    });
+    const payload = (convertsData as Record<string, unknown>[]).map((c) => ({
+      church_id: church.id,
+      name: text(c.name ?? c.full_name ?? c.fullName, 120) ?? 'Unknown',
+      contact: text(c.contact ?? c.phone ?? c.phone_number, 64),
+    }));
 
-    const { error } = await supabase
-      .schema('church')
-      .from('new_converts')
-      .insert(payload);
-
+    const { error } = await supabase.schema('church').from('new_converts').insert(payload);
     if (error) {
-       console.error('Error in bulk insert new converts:', error);
-       return { error: `DB Bulk Insert Error: ${error.message}` };
+      console.error('[new-converts] bulk insert failed:', error.code);
+      return { error: GENERIC_SAVE_ERROR };
     }
-    
-    revalidatePath(`/${churchSlug}/admin/new-converts`);
+    revalidatePath(`/${church.slug}/admin/new-converts`);
     return { success: true };
-  } catch (err: any) {
-    console.error('Unhandled exception in bulkAddNewConverts:', err);
-    return { error: 'Failed to bulk-add new converts due to application error.' };
+  } catch (err) {
+    console.error('[new-converts] bulk failed:', (err as Error).message);
+    return { error: describe(err, 'Failed to import new converts.') };
   }
 }

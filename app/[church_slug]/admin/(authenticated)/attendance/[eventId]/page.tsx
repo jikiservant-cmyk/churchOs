@@ -1,5 +1,6 @@
-import { createClient } from '@/lib/supabase/server';
-import { redirect, notFound } from 'next/navigation';
+import { notFound } from 'next/navigation';
+import { requireTenantAdmin } from '@/lib/auth/tenant';
+import { isUuid } from '@/lib/security';
 import { 
   ArrowLeft, 
   Search, 
@@ -22,31 +23,22 @@ import { EventControl } from './EventControl';
 export default async function EventAttendancePage(props: {
   params: Promise<{ church_slug: string; eventId: string }>;
 }) {
-  const resolvedParams = await props.params;
-  const { church_slug, eventId } = resolvedParams;
-  const supabase = await createClient();
+  const { church_slug, eventId } = await props.params;
+  if (!isUuid(eventId)) notFound();
+  const { church, supabase } = await requireTenantAdmin(church_slug);
 
-  // Optimized parallel fetching
-  const [eventResult, churchResult, logsResult] = await Promise.all([
-    supabase.schema('church').from('events').select('*').eq('id', eventId).single(),
-    supabase.schema('church').from('churches').select('id').eq('slug', church_slug).single(),
-    supabase.schema('church').from('attendance_logs').select('member_id, attendance_status, check_in_time').eq('event_id', eventId)
+  // Every query is scoped to the verified church (RLS is the second layer).
+  const [eventResult, logsResult, membersResult] = await Promise.all([
+    supabase.schema('church').from('events').select('*').eq('id', eventId).eq('church_id', church.id).maybeSingle(),
+    supabase.schema('church').from('attendance_logs').select('member_id, attendance_status, check_in_time').eq('event_id', eventId).eq('church_id', church.id),
+    supabase.schema('church').from('members').select('id, full_name, phone_number, church_id').eq('church_id', church.id).order('full_name'),
   ]);
 
   const { data: event } = eventResult;
-  const { data: church } = churchResult;
   const { data: logs } = logsResult;
+  const { data: members } = membersResult;
 
   if (!event) notFound();
-  if (!church) notFound();
-
-  // Fetch members only after we have church ID
-  const { data: members } = await supabase
-    .schema('church')
-    .from('members')
-    .select('*')
-    .eq('church_id', church.id)
-    .order('full_name');
 
   const attendedLogs = logs?.filter(l => l.attendance_status === 'present' || l.attendance_status === 'late') || [];
   const attendedMemberIdsArray = attendedLogs.map(l => l.member_id);
