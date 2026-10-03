@@ -4,6 +4,7 @@ import { headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { createClient, createAdminClient } from '@/lib/supabase/server';
 import { getClientIp, rateLimit } from '@/lib/security';
+import { denominationsEnabled, firstRow, type LoginContext } from '@/lib/denominations';
 
 export type AuthState = {
   error?: string;
@@ -39,11 +40,19 @@ export async function login(_prev: AuthState, formData: FormData): Promise<AuthS
   }
 
   let targetSlug: string | null = null;
+  let overseer = false;
   try {
     const supabase = await createClient();
     const { data: authData, error: authError } = await supabase.auth.signInWithPassword({ email, password });
     if (authError || !authData.user) {
       return { error: /email not confirmed/i.test(authError?.message ?? '') ? 'Please confirm your email first.' : GENERIC_LOGIN_ERROR };
+    }
+
+    // Overseers (denomination accounts) have no church workspace; route them by DB context.
+    if (denominationsEnabled()) {
+      const { data: ctxData, error: ctxError } = await supabase.rpc('my_login_context');
+      if (ctxError) console.error('[auth] my_login_context failed:', ctxError.code, ctxError.message);
+      overseer = firstRow<LoginContext>(ctxData)?.account_type === 'overseer';
     }
 
     // The profile is looked up by the authenticated user id ONLY (no email fallback).
@@ -52,6 +61,8 @@ export async function login(_prev: AuthState, formData: FormData): Promise<AuthS
       .select('role, tenant_id')
       .eq('id', authData.user.id)
       .maybeSingle();
+
+    if (overseer) return redirect('/overseer');
 
     if (!profile?.tenant_id || String(profile.role).toLowerCase() !== 'pastor') {
       await supabase.auth.signOut();

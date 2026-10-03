@@ -1,5 +1,6 @@
 import { createServerClient } from '@supabase/ssr';
 import { NextResponse, type NextRequest } from 'next/server';
+import { INVITE_COOKIE, INVITE_RE, denominationsEnabled } from '@/lib/denominations';
 
 /**
  * Edge middleware: session refresh + coarse gating + CSRF origin check.
@@ -42,7 +43,22 @@ function originAllowed(request: NextRequest): boolean {
   return allowed.has(origin.replace(/\/+$/, ''));
 }
 
+/** `/signup?invite=CODE` → short-lived httpOnly cookie read by provisionTenant (no UI needed). */
+function rememberInvite(request: NextRequest, response: NextResponse) {
+  if (!denominationsEnabled() || !request.nextUrl.pathname.startsWith('/signup')) return;
+  const code = request.nextUrl.searchParams.get('invite');
+  if (code && INVITE_RE.test(code)) {
+    response.cookies.set(INVITE_COOKIE, code, { httpOnly: true, sameSite: 'lax', secure: process.env.NODE_ENV === 'production', path: '/', maxAge: 60 * 60 * 24 });
+  }
+}
+
 export async function middleware(request: NextRequest) {
+  const response = await handle(request);
+  rememberInvite(request, response);
+  return response;
+}
+
+async function handle(request: NextRequest) {
   const { pathname } = request.nextUrl;
   const method = request.method.toUpperCase();
 
