@@ -13,6 +13,7 @@ import { INVITE_COOKIE, INVITE_RE, denominationsEnabled } from '@/lib/denominati
 const ORIGIN_EXEMPT_API = ['/api/najiki/webhook', '/api/sms/process-queue'];
 
 const ADMIN_PATH = /^\/[^/]+\/admin(?:\/|$)/;
+const OVERSEER_PATH = /^\/overseer(?:\/|$)/;
 const ADMIN_LOGIN_PATH = /^\/[^/]+\/admin\/login\/?$/;
 
 function sessionCookie(options: Record<string, unknown>) {
@@ -77,7 +78,7 @@ async function handle(request: NextRequest) {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
   if (!url || !key) {
-    if (process.env.NODE_ENV === 'production' && ADMIN_PATH.test(pathname) && !ADMIN_LOGIN_PATH.test(pathname)) {
+    if (process.env.NODE_ENV === 'production' && ((ADMIN_PATH.test(pathname) && !ADMIN_LOGIN_PATH.test(pathname)) || OVERSEER_PATH.test(pathname))) {
       return new NextResponse('Service unavailable', { status: 503 });
     }
     return supabaseResponse;
@@ -102,7 +103,7 @@ async function handle(request: NextRequest) {
     // getUser() validates the JWT with Supabase Auth (getSession() would not).
     const { data: { user } } = await supabase.auth.getUser();
 
-    if (ADMIN_PATH.test(pathname) && !ADMIN_LOGIN_PATH.test(pathname) && !user) {
+    if ((ADMIN_PATH.test(pathname) && !ADMIN_LOGIN_PATH.test(pathname) || OVERSEER_PATH.test(pathname)) && !user) {
       const dest = request.nextUrl.clone();
       dest.pathname = '/';
       dest.search = '?error=Session%20Expired';
@@ -111,7 +112,7 @@ async function handle(request: NextRequest) {
   } catch (e) {
     console.error('[middleware] auth check failed:', (e as Error).message);
     // Fail closed for admin routes if Auth is unreachable.
-    if (ADMIN_PATH.test(pathname) && !ADMIN_LOGIN_PATH.test(pathname)) {
+    if ((ADMIN_PATH.test(pathname) && !ADMIN_LOGIN_PATH.test(pathname)) || OVERSEER_PATH.test(pathname)) {
       return new NextResponse('Service unavailable', { status: 503 });
     }
   }

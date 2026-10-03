@@ -22,3 +22,20 @@ test('feature flag is off unless exactly "true"; overseer slug is reserved', () 
   if (prev === undefined) delete process.env.DENOMINATIONS_ENABLED; else process.env.DENOMINATIONS_ENABLED = prev;
   assert.ok(APP_RESERVED_SLUGS.has('overseer'));
 });
+
+import { churchStatus, sortChurches } from '../lib/denominations.ts';
+
+test('churchStatus: 30-day activity window', () => {
+  const now = Date.parse('2026-10-03T00:00:00Z');
+  assert.equal(churchStatus('2026-09-20T00:00:00Z', now), 'active');
+  assert.equal(churchStatus('2026-08-01T00:00:00Z', now), 'inactive');
+  assert.equal(churchStatus(null, now), 'never');
+  assert.equal(churchStatus('garbage', now), 'never');
+});
+
+test('sortChurches: attendance desc, then name; input not mutated', () => {
+  const rows = [{ church_name: 'B', attendance_30d: 5 }, { church_name: 'A', attendance_30d: 5 }, { church_name: 'C', attendance_30d: 9 }, { church_name: 'D', attendance_30d: null }];
+  const out = sortChurches(rows);
+  assert.deepEqual(out.map((r) => r.church_name), ['C', 'A', 'B', 'D']);
+  assert.equal(rows[0].church_name, 'B');
+});

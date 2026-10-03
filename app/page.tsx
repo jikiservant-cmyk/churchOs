@@ -2,6 +2,7 @@ import { createClient } from '@/lib/supabase/server';
 import LoginForm from '@/components/LoginForm';
 import { getChurchBySlug } from '@/lib/db';
 import { redirect } from 'next/navigation';
+import { denominationsEnabled, firstRow, type LoginContext } from '@/lib/denominations';
 import { Suspense } from 'react';
 
 export const dynamic = 'force-dynamic';
@@ -26,7 +27,12 @@ export default async function RootLoginPage({
     try {
       const { data: { user } } = await supabase.auth.getUser();
       
-      if (user) {
+      if (user && denominationsEnabled()) {
+        const { data: ctxData } = await supabase.rpc('my_login_context');
+        if (firstRow<LoginContext>(ctxData)?.account_type === 'overseer') redirectTo = '/overseer';
+      }
+
+      if (user && !redirectTo) {
         // Attempt to find their church via their profile
         const { data: profile } = await supabase
           .from('admin_profiles')

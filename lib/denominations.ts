@@ -26,3 +26,31 @@ export function firstRow<T>(data: unknown): T | null {
   if (Array.isArray(data)) return (data[0] as T) ?? null;
   return (data as T) ?? null;
 }
+
+// ── Overseer dashboard helpers ──────────────────────────────────────────────
+export type ChurchRow = {
+  church_id?: string;
+  church_name?: string | null;
+  attendance_30d?: number | null;
+  last_active_at?: string | null;
+  [k: string]: unknown;
+};
+
+export const ACTIVE_WINDOW_DAYS = 30;
+
+/** A church counts as active when it had activity inside the window. */
+export function churchStatus(lastActiveAt: string | null | undefined, now: number = Date.now()): 'active' | 'inactive' | 'never' {
+  if (!lastActiveAt) return 'never';
+  const t = new Date(lastActiveAt).getTime();
+  if (Number.isNaN(t)) return 'never';
+  return now - t <= ACTIVE_WINDOW_DAYS * 86_400_000 ? 'active' : 'inactive';
+}
+
+/** Highest attendance first; ties and missing values fall back to name. */
+export function sortChurches<T extends ChurchRow>(rows: T[]): T[] {
+  return [...rows].sort(
+    (a, b) =>
+      Number(b.attendance_30d ?? 0) - Number(a.attendance_30d ?? 0) ||
+      String(a.church_name ?? '').localeCompare(String(b.church_name ?? '')),
+  );
+}
