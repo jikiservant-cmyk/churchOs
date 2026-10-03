@@ -7,12 +7,51 @@ export const dynamic = 'force-dynamic';
 
 type Row = Record<string, unknown>;
 
-const label = (k: string) => k.replace(/_/g, ' ');
-const cell = (v: unknown) => (v === null || v === undefined ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v));
+// Columns returned by overseer_church_summary / overseer_denomination_totals.
+// Unknown extra columns are still shown (after the known ones) so a DB change never hides data.
+const LABELS: Record<string, string> = {
+  church_name: 'Church', slug: 'URL', pastor_email: 'Pastor', member_count: 'Members',
+  attendance_30d: 'Attendance (30d)', last_event_date: 'Last event', sms_sent_30d: 'SMS (30d)',
+  last_active_at: 'Last active', joined_at: 'Created',
+  church_count: 'Churches', member_total: 'Members', attendance_30d_total: 'Attendance (30d)',
+  sms_30d_total: 'SMS (30d)', active_churches_30d: 'Active churches (30d)',
+};
+const HIDDEN = new Set(['church_id']);
+const ORDER = Object.keys(LABELS);
+
+const label = (k: string) => LABELS[k] ?? k.replace(/_/g, ' ');
+const isDate = (k: string) => /(_at|_date)$/.test(k);
+function cell(k: string, v: unknown) {
+  if (v === null || v === undefined || v === '') return '—';
+  if (isDate(k) && (typeof v === 'string' || typeof v === 'number')) {
+    const d = new Date(v);
+    if (!Number.isNaN(d.getTime())) return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+  }
+  if (typeof v === 'number') return v.toLocaleString('en-US');
+  return typeof v === 'object' ? JSON.stringify(v) : String(v);
+}
+const columns = (rows: Row[]) => {
+  const keys = Object.keys(rows[0]).filter((k) => !HIDDEN.has(k));
+  return [...ORDER.filter((k) => keys.includes(k)), ...keys.filter((k) => !ORDER.includes(k))];
+};
+
+function Totals({ row }: { row: Row | undefined }) {
+  if (!row) return <p className="text-sm text-[#9A7E65]">Nothing to show yet.</p>;
+  return (
+    <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
+      {columns([row]).map((c) => (
+        <div key={c} className="rounded-xl border border-[rgba(90,55,20,0.15)] bg-white/60 p-4">
+          <div className="text-[10px] font-bold uppercase tracking-widest text-[#9A7E65]">{label(c)}</div>
+          <div className="mt-1 text-2xl font-bold text-[#1E1208]">{cell(c, row[c])}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 function Table({ rows }: { rows: Row[] }) {
-  if (rows.length === 0) return <p className="text-sm text-[#9A7E65]">Nothing to show yet.</p>;
-  const cols = Object.keys(rows[0]);
+  if (rows.length === 0) return <p className="text-sm text-[#9A7E65]">No churches linked yet.</p>;
+  const cols = columns(rows);
   return (
     <div className="overflow-x-auto rounded-xl border border-[rgba(90,55,20,0.15)] bg-white/60">
       <table className="w-full text-left text-sm">
@@ -23,8 +62,8 @@ function Table({ rows }: { rows: Row[] }) {
         </thead>
         <tbody>
           {rows.map((r, i) => (
-            <tr key={i} className="border-b border-[rgba(90,55,20,0.08)] last:border-0">
-              {cols.map((c) => <td key={c} className="px-4 py-3 text-[#1E1208]">{cell(r[c])}</td>)}
+            <tr key={String(r.church_id ?? i)} className="border-b border-[rgba(90,55,20,0.08)] last:border-0">
+              {cols.map((c) => <td key={c} className="px-4 py-3 text-[#1E1208]">{cell(c, r[c])}</td>)}
             </tr>
           ))}
         </tbody>
@@ -68,7 +107,7 @@ export default async function OverseerPage() {
         {(e1 || e2) && <p className="text-sm text-[#B5622A]">Some data could not be loaded.</p>}
         <section className="space-y-3">
           <h2 className="text-[11px] font-bold uppercase tracking-widest text-[#9A7E65]">Totals</h2>
-          <Table rows={toRows(totals)} />
+          <Totals row={toRows(totals)[0]} />
         </section>
         <section className="space-y-3">
           <h2 className="text-[11px] font-bold uppercase tracking-widest text-[#9A7E65]">Churches</h2>
